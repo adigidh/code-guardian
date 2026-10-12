@@ -247,7 +247,7 @@ nothing Slack-related runs; a shepherd run that fires anyway gets
 
 1. Title the session (**Session titles**), then read [monitor.md](monitor.md)
    and report every alert of the worklist in one message — chat UI, plus the
-   escalation DM under Slack.
+   escalation DM under Slack. Alerts the pass sent directly are not in it.
 2. Acknowledge them with `scripts/monitor.sh ack` **after** the send; never
    repair, re-run or reconfigure in response.
 3. Back up `work/` as the very last action.
@@ -314,16 +314,17 @@ nothing Slack-related runs; a shepherd run that fires anyway gets
   does. A quiet-hour tick performs the same full worklist, and no PR is
   skipped, sampled or narrowed for the hour or day it arrived.
 - Never @-mention anyone outside `work/DEVELOPERS.md`. No proactive Slack
-  activity — nudges, reports, watch notifications, urgent alerts — unless
-  `slack_notifications: enabled`; replying to an inbound channel message is
-  always allowed.
+  activity — nudges, reports, watch notifications, urgent alerts, the
+  monitor's direct DM — unless `slack_notifications: enabled`; replying to an
+  inbound channel message is always allowed.
 - `work/` is instance-private and may hold sensitive data (config, roster Slack
   IDs, memory, review history, logs). It leaves the agent only as the
   `work_repo` backup or through the configured output surfaces — chat UI,
   target-repo reviews/comments/issues, the benchmark report on its
-  `benchmark_report` surfaces, Slack when enabled — each message carrying only
-  what it needs. A definition-repo issue carries the closed content list of
-  **Definition-repo issues** alone; nothing from `work/` ever reaches
+  `benchmark_report` surfaces, the health dashboard under
+  `health_dashboard: dam` (counts only), Slack when enabled — each message
+  carrying only what it needs. A definition-repo issue carries the closed
+  content list of **Definition-repo issues** alone; nothing from `work/` ever reaches
   definition commits, PRs, issues, artifacts, or any other external surface. A published artifact passes
   `scripts/lib/redact.sh` first, so no credential shape reaches a public
   surface ([artifact.md](artifact.md) → **Procedure**).
@@ -398,6 +399,7 @@ nothing Slack-related runs; a shepherd run that fires anyway gets
 | [review-urgent.md](review-urgent.md) | `read_set` names it (an `urgent` or `closed` entry, `urgent_alerts_due`), or `post` returns `closed_*` — rapid-first delivery, the closed-PR issue |
 | [review-bookkeeping.md](review-bookkeeping.md) | `read_set` names it (self-heals, label cleanups, prunes, status resets) — the only file of a `housekeeping_only` run |
 | [monitor.md](monitor.md) | Every monitor run, or an operator ask about an alert — the alerts, the ledger and ack, delivery, the stall and anomaly rules |
+| [health.md](health.md) | The operator asks why the agent did not run, about a past outage or the health dashboard — the hourly history, incidents, service status, publish |
 | [review-on-demand.md](review-on-demand.md) | A channel message or a mention asks for a review of a specific PR |
 | [review-mechanics.md](review-mechanics.md) | The manual fallback, or writing a history-file section — posted payload, body format, inline mapping, tracking rows, live holder, history file, ledger; `compose-brief` prints the parts step e needs |
 | [finding-form.md](finding-form.md) | `read_set` names it (`reviews_due` non-empty), or writing a finding — the diff review, a skill subagent's reformat, the benchmark reviewer, the survey: the approval bar and the conciseness rules |

@@ -13,7 +13,8 @@ operator, self-guarded by the `$HOME/.code-guardian-onboarded` sentinel.
 A gated run starts only because `scripts/precheck.sh` already ran its pass —
 `scripts/preflight.sh`, or `scripts/monitor.sh` for the monitor — and found
 work: the prompt carries the path of the computed worklist. The pass detects,
-never acts.
+never acts — except the monitor's opt-in direct DM and dashboard publish
+([docs/monitor.md](docs/monitor.md) → **Direct delivery**).
 
 1. Read the worklist file the prompt names. **Never run the pass again in a
    gated run** — its bookkeeping is one-shot. An ungated run (the audit, the

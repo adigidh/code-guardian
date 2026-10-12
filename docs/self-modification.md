@@ -61,16 +61,18 @@ takes the operator.
 
 - **`scripts/preflight.sh` and `scripts/monitor.sh` detect, the agent acts.**
   Both stay deterministic and GitHub-read-only: no posts, no label or assignee
-  writes, no artifact operations, no Slack, no git commit or push. Their local
-  writes stay limited to bookkeeping (status flips, alert claims, ledger
-  bookkeeping, logs, caches). Anything with judgment belongs to the agent,
-  driven by the worklist.
+  writes, no artifact operations, no Slack, no git commit or push. The one
+  exception is the monitor's opt-in direct delivery and dashboard publish,
+  below. Their local writes stay limited to bookkeeping (status flips, alert
+  claims, ledger bookkeeping, logs, caches). Anything with judgment belongs to
+  the agent, driven by the worklist.
 - **`scripts/precheck.sh` gates, never acts.** It is the schedule's `precheck`:
   one pass — `preflight.sh <mode>`, or `monitor.sh` for the monitor — an exit
   code, and the worklist path on stdout ([worklist.md](worklist.md) → **The
   schedule gate**). It adds no decision of its own — a new gate condition is a
   condition of its pass — and it never posts, commits or writes state beyond
-  that pass's own bookkeeping and its `/tmp` worklist.
+  that pass's own bookkeeping and its `/tmp` worklist; what the monitor's pass
+  sends is the pass's, below.
 - **`scripts/review-pr.sh` executes, never judges.** It performs the mechanical
   steps of a review on the agent's explicit command and with the agent's own
   content — lock, context, clone, payload and POST, label removal, row and
@@ -78,6 +80,12 @@ takes the operator.
   PR closed). It never composes, drops, reorders or reformats a finding. The
   same holds for any script that acts on GitHub for the agent
   (`work-backup.sh persist`).
+- **The monitor's pass is the one script that contacts people and publishes
+  on its own**: its direct DM and its dashboard publish, both opt-in, built
+  from fixed templates and counts only, through `scripts/lib/mcp.sh`
+  ([monitor.md](monitor.md) → **Direct delivery**, [health.md](health.md) →
+  **Publish**). A new outward action of a script extends one of these two, or
+  belongs to the agent.
 - **CLAUDE.md stays a bootstrap** — repo resolution, the run types, the
   read-the-runbook rule. The run procedures and hard invariants live in
   [runbook.md](runbook.md), the schedule gate and the worklist contract in

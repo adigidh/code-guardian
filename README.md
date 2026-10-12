@@ -12,8 +12,9 @@ review (the **PR Shepherd** role).
 Six kinds of scheduled run exist. Five **start with the deterministic
 pre-flight script** [`scripts/preflight.sh`](scripts/preflight.sh), and the
 health monitor with [`scripts/monitor.sh`](scripts/monitor.sh). Both scripts
-only *detect*: they make no GitHub writes and compute the run's worklist. With
-work, the agent performs all of it per the [`docs/`](docs/) procedures.
+only *detect*: they make no GitHub writes and compute the run's worklist. The
+one exception is the monitor's opt-in direct DM and dashboard publish (below).
+With work, the agent performs all of it per the [`docs/`](docs/) procedures.
 
 An empty worklist starts no session at all. Every schedule except the weekly
 audit runs its script as its platform **`precheck`**
@@ -76,6 +77,14 @@ it immediately after the send — send-then-record, roster-only mentions
 review's triage — estimated minutes, what a person must judge, what was
 checked — and `shepherd_scope: needs_human` skips PRs the review called a
 quick check.
+
+**Health monitor** — every 15 minutes; a tick with no alert starts no
+session. `monitor.sh` reads the local logs for model and GitHub outages,
+classifier refusals, a silent review schedule, a failing backup and harness
+drift, and keeps 90 days of hourly technical history and incidents. With the
+opt-ins it sends its alerts itself as a templated Slack DM, so they arrive
+during a model outage, and publishes a health dashboard
+([`docs/monitor.md`](docs/monitor.md), [`docs/health.md`](docs/health.md)).
 
 **Weekly audit** — Friday morning by default, on while `audit_report` is
 enabled (the default).
@@ -263,16 +272,21 @@ what it can and asking for the rest. Per-key semantics are in
 | `stall_alert_threshold` | not set (= `4`) | Stalled reviews within 24 h that trigger one alert, at most once per UTC day; `0`/`off` disables. |
 | `review_anomaly_factor` | not set (= `4`) | A review whose cost, time, context, repeated calls, failures or largest tool result reaches max(floor, this × its model's median) triggers one alert; `0`/`off` disables. |
 | `model_alert_threshold` | not set (= `2`) | Runs ended on an API failure within one outage before the monitor alerts; `0`/`off` disables. |
+| `github_alert_threshold` | not set (= `2`) | Gate passes in a row that could not list the open PRs before the monitor alerts; `0`/`off` disables. |
 | `classifier_alert_threshold` | not set (= `20`) | Auto-mode classifier refusals within 24 h that alert once per UTC day; `0`/`off` disables. |
 | `log_level` | not set (= `info`) | Verbosity of the structured events log `work/logs/events-*.jsonl` (`docs/logging.md`); `debug` also records successful external tool calls. |
 | `escalation_owner` | asked (only when Slack enabled) | Roster member @-mentioned at nudge level 4, and the DM target of the monitor's alerts. |
+| `monitor_slack_direct` | asked with the escalation owner (default `disabled`) | The monitor sends its alerts itself as a templated DM to the escalation owner, so they arrive during a model outage (`docs/monitor.md` → **Direct delivery**). |
+| `health_dashboard` | asked (default `off`) | `dam` publishes the health dashboard — service status, 90 days of hourly history, incidents — updated in place (`docs/health.md`). |
 
 ### Runtime requirements
 
 - **Platform:** the agent assumes the DAM agent infrastructure — `$HOME` at
   `/home/agent` on a persistent `/workspace` volume, the platform's outbound
   auth proxy for GitHub tokens, and the `mcp__platform-outbound__*` tools for
-  schedules, one-time review sessions, session titles and Slack. Running elsewhere requires
+  schedules, one-time review sessions, session titles and Slack. The monitor's
+  opt-ins call that server from a script, at the `platform-outbound` URL of
+  `~/.mcp.json` (`scripts/lib/mcp.sh`). Running elsewhere requires
   adapting those assumptions.
 - **GitHub hosts:** every repo reference is `[<host>/]<owner>/<repo>`, so the
   target repo, this definition, the skill sources and the `work_repo` backup may
@@ -349,7 +363,9 @@ only via this backup or the configured output surfaces (`docs/runbook.md` →
 - [`scripts/preflight.sh`](scripts/preflight.sh) — deterministic pre-flight for
   every run type but the monitor; detects work, never acts on GitHub.
 - [`scripts/monitor.sh`](scripts/monitor.sh) — the monitor's detector: the
-  health alerts, from local files only ([`docs/monitor.md`](docs/monitor.md)).
+  health alerts, from local files only ([`docs/monitor.md`](docs/monitor.md)),
+  plus the opt-in direct DM and dashboard publish
+  ([`docs/health.md`](docs/health.md)).
 - [`scripts/precheck.sh`](scripts/precheck.sh) — the schedule gate: one pass
   of either detector before the session starts, an exit code that skips an
   idle fire, and the worklist path a started run reads.
