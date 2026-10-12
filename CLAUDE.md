@@ -10,17 +10,18 @@ operator, self-guarded by the `$HOME/.code-guardian-onboarded` sentinel.
 
 ## Every scheduled run
 
-A gated run starts only because `scripts/precheck.sh` already ran
-`scripts/preflight.sh` and found work: the prompt carries the path of the
-computed worklist. `scripts/preflight.sh` detects, never acts.
+A gated run starts only because `scripts/precheck.sh` already ran its pass —
+`scripts/preflight.sh`, or `scripts/monitor.sh` for the monitor — and found
+work: the prompt carries the path of the computed worklist. The pass detects,
+never acts.
 
-1. Read the worklist file the prompt names. **Never run `preflight.sh` again in
-   a gated run** — its bookkeeping is one-shot. An ungated run (the audit, the
+1. Read the worklist file the prompt names. **Never run the pass again in a
+   gated run** — its bookkeeping is one-shot. An ungated run (the audit, the
    direct session) runs the entry command itself
    ([docs/worklist.md](docs/worklist.md) → **Entry command**).
 2. **Read [docs/runbook.md](docs/runbook.md) before any other action** — the
    trust boundary, the run procedures (`Review run`, `Shepherd run`,
-   `Audit run`, `Benchmark run`, `Survey run`: the sections a schedule's task
+   `Audit run`, `Benchmark run`, `Survey run`, `Monitor run`: the sections a schedule's task
    text names as `CLAUDE.md → "<name>"`) and the hard invariants — and follow
    it to the end of the run.
 3. No worklist (the gate broke, the file is gone, `nothing_to_do` from an

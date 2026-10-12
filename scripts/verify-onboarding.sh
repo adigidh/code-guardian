@@ -104,8 +104,8 @@ fi
 # The schedule gate — every scheduled run but the audit starts with it, so a
 # missing or unparsable file sends the whole cadence through its "gate broke"
 # path (docs/worklist.md → **The schedule gate**). Structure only: the gate is
-# never executed here, because one fire is one preflight pass and the live
-# section below already spends it.
+# never executed here, because one fire is one gate pass and the live
+# section below already runs preflight once.
 GATE="$SCRIPT_DIR/precheck.sh"
 if [ ! -f "$GATE" ]; then
   fail precheck "scripts/precheck.sh missing" \
@@ -115,6 +115,14 @@ elif ! bash -n "$GATE" 2>/dev/null; then
     "bash -n \"\$HOME/scripts/precheck.sh\" and fix what it reports"
 else
   ok precheck "schedule gate present and parses"
+fi
+# the monitor's detector, which the gate runs for the monitor schedule — never
+# executed here either: a pass claims the alerts it finds (docs/monitor.md)
+if bash -n "$SCRIPT_DIR/monitor.sh" 2>/dev/null && [ -f "$SCRIPT_DIR/monitor.sh" ]; then
+  ok monitor "scripts/monitor.sh present and parses"
+else
+  fail monitor "scripts/monitor.sh missing or does not parse" \
+    "git -C \"\$HOME\" checkout -- scripts/monitor.sh (definition file, ONBOARDING Step 1)"
 fi
 
 SENTINEL="$HOME_DIR/.code-guardian-onboarded"
@@ -137,9 +145,11 @@ else
   for h in log-tool-event.sh log-session-tokens.sh log-review-step.sh enforce-review-completion.sh guard-definition-issue.sh; do
     grep -q "$h" "$SETTINGS" 2>/dev/null || MISSING_HOOKS="$MISSING_HOOKS $h"
   done
-  grep -qF '[code-guardian]' "$SETTINGS" 2>/dev/null || MISSING_HOOKS="$MISSING_HOOKS autoMode-rules"
-  TRIM_MISSING="$(HOME="$HOME_DIR" bash "$SCRIPT_DIR/harness/claude-code/install.sh" --check 2>/dev/null)"
-  [ -n "$TRIM_MISSING" ] && MISSING_HOOKS="$MISSING_HOOKS $TRIM_MISSING"
+  grep -qF '[code-guardian]' "$SETTINGS" 2>/dev/null || MISSING_HOOKS="$MISSING_HOOKS automode-rules"
+  # the parts install.sh --check names, each once
+  for p in $(HOME="$HOME_DIR" bash "$SCRIPT_DIR/harness/claude-code/install.sh" --check 2>/dev/null); do
+    case " $MISSING_HOOKS " in (*" $p "*) ;; (*) MISSING_HOOKS="$MISSING_HOOKS $p";; esac
+  done
   if [ -z "$MISSING_HOOKS" ]; then
     ok hooks "all adapter hooks, auto-mode rules, the tool deny list and the review-skill agent installed"
   else
@@ -201,7 +211,7 @@ else
 
     # A renamed/prosified key is invisible to cfg(), so the runtime silently
     # uses defaults — list what the reader will never see.
-    KNOWN_KEYS="github_repo work_repo definition_repo definition_branch bot_login bot_display_name review_marker rereview_label rereview_trigger urgent_label review_progress ci_triage review_dispatch review_model mention_replies mention_authors project_profile artifact_skill slack_notifications merge_ready_nudge audit_report audit_trend definition_issues survey survey_report survey_report_findings survey_interval_days benchmark benchmark_judge benchmark_report escalation_owner stall_alert_threshold review_anomaly_factor log_level active_hours active_days shepherd_scope human_review_paths auto_merge auto_merge_label auto_merge_max_lines auto_merge_method agent_fixes agent_fix_label review_interval_active review_interval_quiet"
+    KNOWN_KEYS="github_repo work_repo definition_repo definition_branch bot_login bot_display_name review_marker rereview_label rereview_trigger urgent_label review_progress ci_triage review_dispatch review_model mention_replies mention_authors project_profile artifact_skill slack_notifications merge_ready_nudge audit_report audit_trend definition_issues survey survey_report survey_report_findings survey_interval_days benchmark benchmark_judge benchmark_report escalation_owner stall_alert_threshold review_anomaly_factor model_alert_threshold classifier_alert_threshold log_level active_hours active_days shepherd_scope human_review_paths auto_merge auto_merge_label auto_merge_max_lines auto_merge_method agent_fixes agent_fix_label review_interval_active review_interval_quiet"
     UNKNOWN_KEYS=""
     while IFS= read -r k; do
       [ -z "$k" ] && continue
@@ -266,6 +276,8 @@ EOF
     chk_enum log_level 'info|debug' 'info | debug'
     chk_enum stall_alert_threshold '[0-9]+|off' 'an integer | 0 | off'
     chk_enum review_anomaly_factor '0+(\.0+)?|0*[1-9][0-9]*(\.[0-9]+)?|off' 'a number of 1 or more | 0 | off'
+    chk_enum model_alert_threshold '[0-9]+|off' 'an integer | 0 | off'
+    chk_enum classifier_alert_threshold '[0-9]+|off' 'an integer | 0 | off'
     # Review cadence (docs/config.md). Both intervals must
     # divide 60 or `*/N` fires unevenly across the hour boundary, and an active
     # window that wraps midnight is not expressible as a single cron.
@@ -462,7 +474,7 @@ EOF
 
   # --- unexpected top-level entries (known = templates + runtime bookkeeping;
   #     .gitignore may arrive via restore from the work backup repo)
-  KNOWN="AGENTS.md CONFIG.md MEMORY.md REVIEWS.md LESSONS.md DEVELOPERS.md SHEPHERD.md MENTIONS.md PROFILE.md PROFILE.json PROFILE-NOTES.md VERSION AUDIT.log HEARTBEAT.log SHEPHERD.log REVIEW-LEDGER.jsonl REVIEW-USAGE.jsonl PR-EVENTS.jsonl logs reviews memory benchmark audit survey .cache .gitignore .stall-alert-day .stall-alert.lock .review-anomaly-seen .review-anomaly.lock .housekeeping-since .holds.lock"
+  KNOWN="AGENTS.md CONFIG.md MEMORY.md REVIEWS.md LESSONS.md DEVELOPERS.md SHEPHERD.md MENTIONS.md PROFILE.md PROFILE.json PROFILE-NOTES.md VERSION AUDIT.log HEARTBEAT.log SHEPHERD.log REVIEW-LEDGER.jsonl REVIEW-USAGE.jsonl PR-EVENTS.jsonl logs reviews memory benchmark audit survey .cache .gitignore .stall-alert-day .stall-alert.lock .review-anomaly-seen .review-anomaly.lock MONITOR.json MONITOR.json.lock MONITOR.json.break.lock .housekeeping-since .holds.lock"
   UNKNOWN=""
   for e in "$WORK"/* "$WORK"/.[!.]*; do
     [ -e "$e" ] || continue

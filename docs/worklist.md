@@ -1,33 +1,35 @@
 # The schedule gate and the worklist
 
 Read this file when a run has no worklist from the gate — the ungated audit,
-the direct session, a gate that broke — when preflight printed no JSON, or when
+the direct session, a gate that broke — when a pass printed no JSON, or when
 the operator asks about the gate or a worklist key. A gated run already holds
 its worklist and follows [runbook.md](runbook.md) alone.
 
 ## The schedule gate
 
 Every gated schedule — all of them except the audit — carries a `precheck`:
-`scripts/precheck.sh <mode>` runs preflight *before* the platform starts a
-session and turns the answer into an exit code, so a tick with no work costs no
-model call at all. A started run receives the gate's stdout: the
-`worklist: <path>` line, the due keys, and preflight's `logs` to echo.
+`scripts/precheck.sh <mode>` runs one pass — `scripts/preflight.sh <mode>`, or
+`scripts/monitor.sh` for the monitor ([monitor.md](monitor.md)) — *before* the
+platform starts a session and turns the answer into an exit code, so a tick
+with no work costs no model call at all. A started run receives the gate's
+stdout: the `worklist: <path>` line, the due keys, and the pass's `logs` to
+echo.
 
-- **Read that file and never run `preflight.sh` again this run.** One fire is
-  one preflight pass: the `done → awaiting_label` flip, the once-per-UTC-day
-  stall-alert claim and the anomaly-alert marker are already spent, so a second
-  pass answers with less than the first.
+- **Read that file and never run `preflight.sh` (or `monitor.sh`) again this
+  run.** One fire is one pass: the `done → awaiting_label` flip, the
+  monitor's claims, the once-per-UTC-day stall-alert claim and the
+  anomaly-alert marker are already spent, so a second pass answers with less
+  than the first.
 - **Bookkeeping alone waits.** `selfheals_due`, `prunes_due` and
   `status_resets_due` never open the gate by themselves: they ride along with
   the next run that has work of its own, and start a run of their own only after
   6 hours of waiting or 10 pending items. That run's worklist carries
   `housekeeping_only: true` and reads the short set ([runbook.md](runbook.md) →
-  **Review run** step 2). A `stall_alert` or `review_anomaly` never waits — its
-  claim is spent the moment preflight detects it.
+  **Review run** step 2).
 - A gated idle tick produces no chat line. `HEARTBEAT.log` and the structured
   log are its record ([logging.md](logging.md)), and the audit's heartbeat-gap
   check reads them. The gate logs outside a session, so its `precheck` event and
-  the preflight pass it drives carry their own run id and the session carries
+  the pass it drives carry their own run id and the session carries
   another — read one fire as that pair ([logging.md](logging.md) → **The events
   log**).
 - The gate broke — a crash, a pass over the gate's own 100 s budget (its prompt
@@ -46,7 +48,8 @@ model call at all. A started run receives the gate's stdout: the
 ## The pre-flight contract
 
 **Entry command:** `bash "$HOME/scripts/preflight.sh" <mode>` — `review`,
-`shepherd`, `audit`, `benchmark` or `survey` — for a run whose prompt carries
+`shepherd`, `audit`, `benchmark` or `survey`; `bash "$HOME/scripts/monitor.sh"`
+for the monitor — for a run whose prompt carries
 no worklist path. Cadence, gate and task text per run: ONBOARDING Step 6.
 
 **The script detects, it never acts** — no GitHub writes, no commits, no
@@ -70,7 +73,7 @@ entry's inventory ([profile.md](profile.md)).
 Its only local writes are bookkeeping: the REVIEWS.md `done → awaiting_label`
 flip, shepherd-ledger bookkeeping for rows with no nudge due,
 `work/PR-EVENTS.jsonl` facts, the housekeeping batch's wait marker
-(`work/.housekeeping-since`), the stall-alert day claim, dead PR holds and stale
+(`work/.housekeeping-since`), dead PR holds and stale
 clones removed, log lines (`HEARTBEAT.log`, `SHEPHERD.log`, structured events
 per [logging.md](logging.md)), the skill cache, the project profile
 (`work/PROFILE.{json,md}` and its `/tmp` mirror), and the audit-mode retention
@@ -110,8 +113,6 @@ changes", then end the run the same way.
 | `stats`, `checks`, `failures` | audit mode: 7-day statistics, deterministic health checks, and the week's error events grouped into signatures for you to diagnose | [audit.md](audit.md) |
 | `benchmark_due` | benchmark mode: `action: create_fixture` \| `run` | [benchmark.md](benchmark.md) |
 | `survey_due` | survey mode: the area to read this run, with its caps and history slice | [survey.md](survey.md) |
-| `stall_alert` | `{count, threshold, prs, window_hours, per_day_7d}`, present only when stalled reviews in the last 24 h reached `stall_alert_threshold` (once per UTC day) → report it after the review work | review-bookkeeping.md → **Stalled-review rate alert** |
-| `review_anomaly` | `{factor, reviews}`, present only when a review finished since the last pass broke a rule — a metric at or over max(floor, `review_anomaly_factor` × its model's median) (each review judged once) → report it after the review work | review-bookkeeping.md → **Review anomaly alert** |
 | `housekeeping_only` | present and `true` when the run carries bookkeeping alone → the short read set and the short self-check | **The schedule gate** |
 | `dispatched` | `{number, by}`, present in a worklist `dispatch.sh plan` cut for one PR → the session takes that PR's hold first | [runbook.md](runbook.md) → **Review run** step 1 |
 | `read_set` | review mode: the files this run reads before acting — the **Where** files of the due keys above, plus `work/MEMORY.md` and `work/LESSONS.md` | [runbook.md](runbook.md) → **Review run** |
@@ -157,8 +158,8 @@ dispatched session's `sessionTitle` and the `title` of `rest`
 (`Re-review PR #<n>`, `Review urgent PR #<n>`), `Answer mention on #<n>`,
 `Publish artifact for PR #<n>`, `Triage CI on PR #<n>`, `Merge PR #<n>`,
 `Fix findings on PR #<n>`; `Review PRs #<n>, #<m>` for several kept PRs;
-with none, `Report review alerts` when `urgent_alerts_due`, `stall_alert` or
-`review_anomaly` is due, else `Tidy review state`.
+with none, `Report review alerts` when `urgent_alerts_due` is due, else
+`Tidy review state`.
 
 ## Runtime configuration: `work/CONFIG.md`
 

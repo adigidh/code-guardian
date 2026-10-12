@@ -130,6 +130,30 @@ assert_out_contains 'manually' 'and tells the run to do the work itself'
 assert_file_contains "$WORK/logs/events-$(date -u +%Y-%m-%d).jsonl" 'stopped at its 3s budget' \
   'the cause also reaches the structured log'
 
+# --- a broken monitor gate names monitor.sh, never preflight -----------------
+# the error event says which pass broke: no JSON, could not decide, over budget
+new_case precheck_monitor_broken
+base_config
+mkdir -p "$SANDBOX/scripts/lib"
+cp "$REPO_ROOT/scripts/precheck.sh" "$REPO_ROOT/scripts/log.sh" "$SANDBOX/scripts/"
+cp "$REPO_ROOT/scripts/lib/toolpath.sh" "$SANDBOX/scripts/lib/"
+EVENTS="$WORK/logs/events-$(date -u +%Y-%m-%d).jsonl"
+printf '#!/usr/bin/env bash\nexit 3\n' > "$SANDBOX/scripts/monitor.sh"
+run_precheck monitor "$SANDBOX/scripts"
+assert_rc 2 'a monitor pass with no JSON never skips the fire'
+assert_file_contains "$EVENTS" 'monitor gate: monitor.sh printed no worklist (exit 3)' 'the event names monitor.sh'
+printf '#!/usr/bin/env bash\nprintf %%s "{\\"nothing_to_do\\":false,\\"error\\":\\"x\\"}"\n' > "$SANDBOX/scripts/monitor.sh"
+run_precheck monitor "$SANDBOX/scripts"
+assert_rc 2 'a monitor pass that could not decide never skips the fire'
+assert_file_contains "$EVENTS" 'monitor gate: monitor.sh could not decide' 'the event names monitor.sh'
+printf '#!/usr/bin/env bash\nsleep 30\n' > "$SANDBOX/scripts/monitor.sh"
+CG_PRECHECK_BUDGET_S=1 run_precheck monitor "$SANDBOX/scripts"
+assert_rc 2 'a monitor pass over budget never skips the fire'
+assert_file_contains "$EVENTS" 'monitor gate: monitor.sh stopped at its 1s budget' 'the event names monitor.sh'
+if grep -q '"msg":"monitor gate: preflight' "$EVENTS" 2>/dev/null; then
+  printf 'FAIL %s: a monitor gate event names preflight\n' "$CASE"; FAILED=1
+else printf 'ok   %s: no monitor gate event names preflight\n' "$CASE"; fi
+
 # --- work is due but the worklist cannot be written --------------------------
 # the bookkeeping of this pass is already spent, so the gate must start the
 # session (exit 0) and name no path, never skip the fire
@@ -147,7 +171,20 @@ chmod 700 "$SANDBOX/tmp"
 assert_rc 0 'an unwritable worklist starts the session anyway'
 assert_out_absent '^worklist: ' 'and names no path'
 assert_out_contains 'could not be written' 'and says why the run recomputes it'
-assert_out_contains 'stall or anomaly alert may be missing' 'and what the spent bookkeeping costs'
+assert_out_contains '(the awaiting_label flip) is already spent' 'and names the bookkeeping the review pass spent'
+assert_out_absent 'stall|anomaly' 'and no alert the review pass no longer makes'
+assert_out_contains 'scripts/preflight.sh" review`' 'and names the pass with its mode'
+
+# the monitor's pass takes no mode: the recovery command it names must run
+printf '#!/usr/bin/env bash\nprintf %%s "{\\"nothing_to_do\\":false,\\"alerts_due\\":[{\\"id\\":\\"x\\"}],\\"logs\\":[]}"\n' \
+  > "$SANDBOX/scripts/monitor.sh"
+chmod 500 "$SANDBOX/tmp"
+run_precheck monitor "$SANDBOX/scripts"
+chmod 700 "$SANDBOX/tmp"
+assert_rc 0 'an unwritable monitor worklist starts the session too'
+assert_out_contains 'scripts/monitor.sh"` yourself' 'and names monitor.sh without a mode'
+assert_out_contains '(the alert claims, the daily stall-alert claim, the anomaly-alert marker) is already spent' 'and the bookkeeping the monitor pass spent'
+assert_out_absent 'awaiting_label' 'and no review bookkeeping'
 
 # --- the gate cleans up after itself ----------------------------------------
 # a skipped fire has no session to sweep its scratch, so the gate does it
