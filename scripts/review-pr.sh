@@ -63,6 +63,8 @@
 #   row <n> <sha> <ts> <verdict> <status>  a bookkeeping REVIEWS.md row write —
 #   row <n> --delete                       self-heal, prune, status reset — or its
 #                                          deletion, under the row lock
+#   progress <n> <sha> <state> <desc> [url] one progress write under
+#                                          review_progress — the status reset
 #   fix-start <n> --sha <sha>              start a `fixes_due` entry: re-read the PR
 #                                          (open, head = <sha>, label present, branch in
 #                                          the target repo), remove the label, clone the
@@ -88,7 +90,7 @@
 # limits.txt, findings.annotated.json), .fix (the agent-fix clone), .ci/ (the
 # CI evidence files; preflight's stale-clone sweep removes them). GitHub
 # writes happen only in `rapid` and `post` (the review the agent wrote, the
-# label removal and approval dismissal docs/review.md mandates), the progress
+# trigger removal and approval dismissal docs/review.md mandates), the progress
 # status under review_progress, and the opt-in `merge`, `fix-start` (label
 # removal) and `fix-push` (docs/auto-merge.md, docs/agent-fixes.md).
 # Requires bash, gh (authenticated), jq, git, sed/grep/cut/tr — awk-free.
@@ -102,8 +104,8 @@ usage() { # the subcommand table of this file's header, verbatim
   sed -n '/^#   prepare /,/^#$/p' "$0" | sed -e '/^#$/d' -e 's/^# \{0,3\}//'
 }
 case " $* " in (*" -h "*|*" --help "*) usage; exit 0;; esac
-case "$CMD" in (prepare|step|guard|context|sweep|collect|delta|compose-brief|rapid|post|ci|verify|abort|hold|release|row|fix-start|fix-push|merge) ;;
-  (*) printf 'usage: %s prepare|step|guard|context|sweep|collect|delta|compose-brief|rapid|post|ci|verify|abort|hold|release|row|fix-start|fix-push|merge <pr-number> …\n' "$0" >&2; usage >&2; exit 2;; esac
+case "$CMD" in (prepare|step|guard|context|sweep|collect|delta|compose-brief|rapid|post|ci|verify|abort|hold|release|row|progress|fix-start|fix-push|merge) ;;
+  (*) printf 'usage: %s prepare|step|guard|context|sweep|collect|delta|compose-brief|rapid|post|ci|verify|abort|hold|release|row|progress|fix-start|fix-push|merge <pr-number> …\n' "$0" >&2; usage >&2; exit 2;; esac
 case "$N" in (''|*[!0-9]*) printf '{"outcome":"error","error":"pr number missing or not numeric"}\n'; exit 0;; esac
 shift 2
 
@@ -141,13 +143,15 @@ export GH_HOST="$REPO_HOST"
 BOT_LOGIN="$(cfg bot_login)"
 BOT_NAME="$(cfg bot_display_name)"; BOT_NAME="${BOT_NAME:-Code Guardian}"
 REVIEW_MARKER="$(cfg review_marker)"
+CI_OWN_CHECK="$REVIEW_MARKER"   # lib/ci-rollup.sh skips the own progress signal
 REREVIEW_LABEL="$(cfg rereview_label)"; REREVIEW_LABEL="${REREVIEW_LABEL:-code-guardian-review}"
+REREVIEW_DELTA_LABEL="$(cfg rereview_delta_label)"   # a delta re-review, like a review request
 URGENT_LABEL="$(cfg urgent_label)"
 # preflight's trigger gate: an unknown value, or a review request without
-# bot_login, reads as label-only
+# bot_login or to a GitHub App bot_login, reads as label-only
 TRIG="$(cfg rereview_trigger)"
 case "$TRIG" in (label|review-request|both) ;; (*) TRIG=label;; esac
-[ -n "$(cfg bot_login)" ] || TRIG=label
+{ [ -n "$BOT_LOGIN" ] && [ "$(login_kind "$BOT_LOGIN")" = user ]; } || TRIG=label
 PROGRESS="$(cfg review_progress)"; PROGRESS="${PROGRESS:-disabled}"
 HUMAN_PATHS="$(cfg human_review_paths | tr -d '`')"
 # lib/paths.sh is optional: unreadable, no path forces a triage
@@ -310,17 +314,69 @@ severity_rubric() {
 }
 
 # ------------------------------------------------------ progress status ----
+# The channel follows the token (docs/review-bookkeeping.md → Progress signal):
+# a GitHub App writes a check run, a user token a commit status — only an App
+# can create check runs. A refused write tries the other channel once.
+status_write() { # <sha> <state> <description> [target_url]
+  if [ -n "${4:-}" ]; then
+    gh api -X POST "repos/$REPO/statuses/$1" -f state="$2" -f context="$REVIEW_MARKER" -f description="$3" -f target_url="$4" >/dev/null 2>&1
+  else
+    gh api -X POST "repos/$REPO/statuses/$1" -f state="$2" -f context="$REVIEW_MARKER" -f description="$3" >/dev/null 2>&1
+  fi
+}
+# The check run's text: how a person asks for the next review round
+check_help() {
+  local h="$BOT_LOGIN"
+  [ "$(login_kind "$h")" = app ] && h="${h%"[bot]"}"
+  printf '**Request a new review**\n\n'
+  case "$TRIG" in (label|both) printf -- '- Add the label `%s` to get a full review of the pull request.\n' "$REREVIEW_LABEL";; esac
+  [ -n "$REREVIEW_DELTA_LABEL" ] \
+    && printf -- '- Add the label `%s` to get a review of the changes since the last review.\n' "$REREVIEW_DELTA_LABEL"
+  case "$TRIG" in (review-request|both)
+    printf -- '- Request a review from `%s` to get a review of the changes since the last review.\n' "$BOT_LOGIN";; esac
+  [ -n "$h" ] && [ "$(cfg mention_replies)" != disabled ] \
+    && printf -- '- Write `@%s please re-review` in a comment to get a review of the changes since the last review.\n' "$h"
+  return 0
+}
+# One line per update in the summary, so the run shows the review's timeline;
+# an update completes this App's open run of the SHA in place, else creates a
+# run. An unreadable token login matches no run, so it creates its own, and
+# the created run's App becomes the token's login for the next update.
+check_write() { # <sha> <state> <description> [target_url] — updates this SHA's open run, else creates one
+  local run id now me body
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; me="$(token_login)"
+  run="$(gh api "repos/$REPO/commits/$1/check-runs?check_name=$(uri "$REVIEW_MARKER")&filter=latest" 2>/dev/null \
+        | jq -c --arg me "$me" '[.check_runs[]? | select(.status != "completed")
+                 | select(((.app.slug // "") + "[bot]") == $me)][0] // empty' 2>/dev/null)"
+  id="$(printf '%s' "$run" | jq -r '.id // empty' 2>/dev/null)"
+  body="$(jq -nc --arg n "$REVIEW_MARKER" --arg sha "$1" --arg s "$2" --arg d "$3" --arg u "${4:-}" --arg t "$now" \
+      --arg p "$(printf '%s' "$run" | jq -r '.output.summary // empty' 2>/dev/null)" --arg help "$(check_help)" '
+    ("- `" + $t[11:16] + "Z` " + $d + (if $u != "" then " — [open](" + $u + ")" else "" end)) as $line
+    | {name:$n, head_sha:$sha,
+       output:{title:$d, summary:(if $p == "" then $line else $p + "\n" + $line end), text:$help}}
+    + (if $s == "pending" then {status:"in_progress"} else {status:"completed", conclusion:"success", completed_at:$t} end)
+    + (if $u != "" then {details_url:$u} else {} end)')"
+  if [ -n "$id" ]; then
+    printf '%s' "$body" | jq -c 'del(.head_sha)' | gh api -X PATCH "repos/$REPO/check-runs/$id" --input - >/dev/null 2>&1
+  else
+    local resp app
+    resp="$(printf '%s' "$body" | jq -c --arg t "$now" '. + {started_at:$t}' | gh api -X POST "repos/$REPO/check-runs" --input - 2>/dev/null)" || return 1
+    app="$(printf '%s' "$resp" | jq -r '.app.slug // empty' 2>/dev/null)"
+    [ -z "$me" ] && [ -n "$app" ] && identity_record "$app[bot]"
+    return 0
+  fi
+}
+progress_write() { # <sha> <state> <description> [target_url]
+  [ -n "$(token_login)" ] || identity_refresh || true
+  if [ "$(token_kind)" = app ]; then check_write "$@" || status_write "$@"
+  else status_write "$@" || check_write "$@"; fi
+}
 progress() { # <state> <description> [target_url] — best-effort (docs/review.md)
   [ "$PROGRESS" = "enabled" ] || return 0
   local sha; sha="$(ctx_get '.head_sha')"; [ -n "$sha" ] && [ "$sha" != "null" ] || return 0
   local desc; desc="$(printf '%s' "$2" | tr -cd '\11\12\15\40-\176' | cut -c1-138)"   # ASCII only, <140 chars
-  if [ -n "${3:-}" ]; then
-    gh api -X POST "repos/$REPO/statuses/$sha" -f state="$1" -f context="$REVIEW_MARKER" -f description="$desc" -f target_url="$3" >/dev/null 2>&1 \
-      || logev warn progress_status "PR #$N: status write did not succeed ($1: $desc)"
-  else
-    gh api -X POST "repos/$REPO/statuses/$sha" -f state="$1" -f context="$REVIEW_MARKER" -f description="$desc" >/dev/null 2>&1 \
-      || logev warn progress_status "PR #$N: status write did not succeed ($1: $desc)"
-  fi
+  progress_write "$sha" "$1" "$desc" "${3:-}" \
+    || logev warn progress_status "PR #$N: progress write did not succeed ($1: $desc)"
 }
 
 # ---------------------------------------------------------------- cleanup ----
@@ -366,10 +422,11 @@ pr_state() { # → JSON of the live PR (Check 1 / Check 2), or empty
 }
 
 trigger_live() { # <labels-json> <requested-json> → 0 when a re-review trigger is present
-  local l=1 r=1
+  local l=1 r=1 d=1
   case "$TRIG" in (label|both) printf '%s' "$1" | jq -e --arg x "$REREVIEW_LABEL" 'index($x) != null' >/dev/null 2>&1 && l=0;; esac
   case "$TRIG" in (review-request|both) [ -n "$BOT_LOGIN" ] && printf '%s' "$2" | jq -e --arg x "$BOT_LOGIN" 'index($x) != null' >/dev/null 2>&1 && r=0;; esac
-  [ "$l" -eq 0 ] || [ "$r" -eq 0 ]
+  [ -n "$REREVIEW_DELTA_LABEL" ] && printf '%s' "$1" | jq -e --arg x "$REREVIEW_DELTA_LABEL" 'index($x) != null' >/dev/null 2>&1 && d=0
+  [ "$l" -eq 0 ] || [ "$r" -eq 0 ] || [ "$d" -eq 0 ]
 }
 
 # marker-based dedup at one SHA → GitHub timestamp, "" when absent, __api_error__
@@ -1373,6 +1430,23 @@ cmd_compose_brief() {
   exit 0
 }
 
+# ------------------------------------------------------ own pull request ----
+# GitHub refuses an approval or a change request from the pull request's own
+# author, so the token's login that opened the PR posts its verdict as a
+# COMMENT (docs/github-access.md → Own pull request). A 422 that says so turns
+# the one retry into a COMMENT too, for an identity cache that is not there.
+review_event() { # <verdict> → the event GitHub accepts from this account
+  local a t; a="$(ctx_get '.author')"
+  t="$(token_login)"; [ -n "$t" ] || { identity_refresh >/dev/null 2>&1; t="$(token_login)"; }
+  if [ "$1" != COMMENT ] && [ -n "$a" ] && [ "$a" = "$t" ]; then printf COMMENT; else printf '%s' "$1"; fi
+}
+# gh prints GitHub's error body on stdout and only its message on stderr, so
+# the error text of a failed call is both streams
+own_pr_refused() { printf '%s' "$1" | grep -qiE 'own pull request'; }   # <error text>
+own_pr_note() { # <verdict> → the body line that names the verdict GitHub did not take
+  printf '> **Verdict: %s.** This account opened the pull request. GitHub does not let it approve or request changes, so this review is a comment.\n\n' "$1"
+}
+
 # =================================================================== rapid ====
 cmd_rapid() {
   need_ctx
@@ -1383,12 +1457,20 @@ cmd_rapid() {
   local m="<!-- $REVIEW_MARKER:rapid headRefOid=$sha -->" r
   r="$(gh_get_all "repos/$REPO/pulls/$N/reviews?per_page=100" | jq -r --arg m "$m" '[.[] | select(.body != null) | select(.body | contains($m))] | length' 2>/dev/null)"
   [ "${r:-0}" -gt 0 ] && out "$(jq -nc '{outcome:"already_posted", phase:"rapid"}')"
-  { cat "$body"; printf '\n\n%s\n' "$m"; } | jq -Rs --arg sha "$sha" --arg v "$verdict" '{commit_id:$sha, event:$v, body:.}' > "$PAYLOAD"
+  local ev; ev="$(review_event "$verdict")"
+  rapid_payload() {
+    { [ "$ev" = "$verdict" ] || own_pr_note "$verdict"; cat "$body"; printf '\n\n%s\n' "$m"; } \
+      | jq -Rs --arg sha "$sha" --arg v "$ev" '{commit_id:$sha, event:$v, body:.}' > "$PAYLOAD"
+  }
+  rapid_payload
   local resp
-  resp="$(gh api "repos/$REPO/pulls/$N/reviews" -X POST --input "$PAYLOAD" 2>/dev/null)" \
-    || { sleep 1; resp="$(gh api "repos/$REPO/pulls/$N/reviews" -X POST --input "$PAYLOAD" 2>/dev/null)"; } \
-    || { rm -f "$PAYLOAD"; fail "rapid POST did not succeed after one retry"; }
-  rm -f "$PAYLOAD"
+  resp="$(gh api "repos/$REPO/pulls/$N/reviews" -X POST --input "$PAYLOAD" 2>"$CTX/rapid.err")" \
+    || { if [ "$ev" != COMMENT ] && own_pr_refused "$(cat "$CTX/rapid.err" 2>/dev/null; printf '%s' "$resp")"; then ev=COMMENT; rapid_payload
+         else sleep 1; fi
+         resp="$(gh api "repos/$REPO/pulls/$N/reviews" -X POST --input "$PAYLOAD" 2>/dev/null)"; } \
+    || { rm -f "$PAYLOAD" "$CTX/rapid.err"; fail "rapid POST did not succeed after one retry"; }
+  rm -f "$PAYLOAD" "$CTX/rapid.err"
+  [ "$ev" = "$verdict" ] || logev warn review_pr "PR #$N: rapid $verdict posted as COMMENT — this account opened the pull request"
   write_row "$sha" "$(now_iso)" RAPID in_progress
   jq '.rapid_posted = true' "$CTX/pr.json" > "$CTX/pr.json.tmp" && mv "$CTX/pr.json.tmp" "$CTX/pr.json"
   logstep "${sha:0:7} rapid posted"
@@ -1399,16 +1481,18 @@ cmd_rapid() {
   local ptxt="rapid review: approved · full review running"
   [ "$verdict" = "APPROVE" ] || ptxt="rapid review: changes requested · full review running"
   progress pending "$ptxt" "$(printf '%s' "$resp" | jq -r '.html_url // empty')"
-  out "$(printf '%s' "$resp" | jq -c --arg v "$verdict" --argjson d "${dismissed:-null}" '{outcome:"posted", phase:"rapid", verdict:$v, review_id:.id, url:.html_url, dismissed_approval:$d}')"
+  out "$(printf '%s' "$resp" | jq -c --arg v "$verdict" --arg ev "$ev" --argjson d "${dismissed:-null}" '{outcome:"posted", phase:"rapid", verdict:$v, event:$ev, review_id:.id, url:.html_url, dismissed_approval:$d}')"
 }
 
 # dismiss_approvals <own-review-id> <sha7> <verdict> <review|rapid> → the last
-# dismissed id, or `null`. Every standing APPROVED review of the agent — its
-# login, its review marker or its rapid marker, never a human's — except the
-# one just posted; a failed dismissal is logged, not fatal.
+# dismissed id, or `null`. Every standing APPROVED review of the agent — the
+# login of a user bot_login (lib/common.sh → self_trusted_login), its review
+# marker or its rapid marker, never a human's or another agent's on a shared
+# GitHub App login — except the one just posted; a failed dismissal is logged,
+# not fatal.
 dismiss_approvals() {
   local ids aid last=null what="review"; [ "$4" = "rapid" ] && what="rapid review"
-  ids="$(gh_get_all "repos/$REPO/pulls/$N/reviews?per_page=100" | jq -r --arg b "$BOT_LOGIN" \
+  ids="$(gh_get_all "repos/$REPO/pulls/$N/reviews?per_page=100" | jq -r --arg b "$(self_trusted_login)" \
       --arg m "<!-- $REVIEW_MARKER headRefOid=" --arg mr "<!-- $REVIEW_MARKER:rapid headRefOid=" --argjson me "$1" \
       '.[] | select(.id != $me and .state == "APPROVED" and ((($b != "") and ((.user.login // "") == $b)) or ((.body // "") | contains($m)) or ((.body // "") | contains($mr)))) | .id' 2>/dev/null)"
   for aid in $ids; do
@@ -1479,10 +1563,15 @@ cmd_post() {
       out "$(jq -nc --arg s "$scope" '{outcome:"closed_discarded", scope:$s}')"
     fi
     # the bot's own issues, every page — the marker is in one of them or in none
-    local im="<!-- $REVIEW_MARKER:issue headRefOid=$sha -->" existing q="state=all&per_page=100" it
-    [ -n "$BOT_LOGIN" ] && q="$q&creator=$BOT_LOGIN"
-    existing="$(gh api --paginate "repos/$REPO/issues?$q" 2>/dev/null | jq -s --arg m "$im" \
-      '[ .[] | select(type=="array") | .[] | select(.pull_request == null) | select((.body // "") | contains($m)) | .number ] | first // empty' -r 2>/dev/null)"
+    # per creator: bot_login, then the token's login when it differs
+    local im="<!-- $REVIEW_MARKER:issue headRefOid=$sha -->" existing="" q it who tl
+    tl="$(token_login)"; [ "$tl" = "$BOT_LOGIN" ] && tl=""
+    for who in "$BOT_LOGIN" ${tl:+"$tl"}; do
+      q="state=all&per_page=100"; [ -n "$who" ] && q="$q&creator=$(uri "$who")"
+      existing="$(gh api --paginate "repos/$REPO/issues?$q" 2>/dev/null | jq -s --arg m "$im" \
+        '[ .[] | select(type=="array") | .[] | select(.pull_request == null) | select((.body // "") | contains($m)) | .number ] | first // empty' -r 2>/dev/null)"
+      [ -n "$existing" ] && break
+    done
     it="Critical findings from review of closed PR #$N"
     [ "$scope" = "blocking" ] && it="Blocking findings from review of PR #$N after its rapid approval"
     out "$(jq -nc --argjson f "$found" --arg s "$scope" --arg t "$it" --arg m "$im" --arg e "${existing:-}" --arg a "$(ctx_get '.author')" \
@@ -1585,16 +1674,18 @@ cmd_post() {
   # what the next `prepare` compares its own range against. Never rendered.
   # `rereview` tells the author's fix round how the next round is requested
   # (docs/config.md → rereview_trigger): the label under `label`/`both`, the
-  # login to request a review from under `review-request`/`both`.
-  local mj="" rr_lbl=null rr_login=null
+  # login to request a review from under `review-request`/`both`, and the
+  # delta label (`rereview_delta_label`) when one is set.
+  local mj="" rr_lbl=null rr_login=null rr_delta=null
   case "$TRIG" in (label|both) rr_lbl="$(jq -nc --arg v "$REREVIEW_LABEL" '$v')";; esac
   case "$TRIG" in (review-request|both) [ -n "$BOT_LOGIN" ] && rr_login="$(jq -nc --arg v "$BOT_LOGIN" '$v')";; esac
+  [ -n "$REREVIEW_DELTA_LABEL" ] && rr_delta="$(jq -nc --arg v "$REREVIEW_DELTA_LABEL" '$v')"
   # `triage` is the agent's call on whether a person must read this PR
   # (docs/review-mechanics.md → Summary body format); a changed file under
   # `human_review_paths` forces `needs-human`, whatever the call said.
   local forced; forced="$(forced_human_path)"
   mj="$(jq -nc --slurpfile m "${META:-/dev/null}" --arg d "$(diff_digest)" --arg t "$TRIG" \
-    --argjson l "$rr_lbl" --argjson u "$rr_login" --arg f "$forced" \
+    --argjson l "$rr_lbl" --argjson u "$rr_login" --argjson dl "$rr_delta" --arg f "$forced" \
     '(($m[0] // {}) | if type == "object" then . else {} end)
      | ((.triage // null) | if type == "object" then . else null end) as $tr
      | (if $tr == null and $f == "" then null
@@ -1604,12 +1695,13 @@ cmd_post() {
               minutes: (($tr.minutes // null) | if type == "number" and . > 0 then (. | floor) else null end)}
              + (if $f == "" then {} else {forced: $f} end) end) as $triage
      | {diff_digest: $d, checks: (.checks // []), deferred: (.deferred // []),
-        rereview: {trigger: $t, label: $l, login: $u}}
+        rereview: ({trigger: $t, label: $l, login: $u} + (if $dl == null then {} else {delta_label: $dl} end))}
        + (if $triage == null then {} else {triage: $triage} end)' 2>/dev/null | sed 's/--/–/g')"
 
   build_payload() { # <comments-json> <moved-json> → $PAYLOAD; findings-json gets inline:false for moved anchors
     fj="$(jq -c --argjson m "$2" 'map(. as $f | if any($m[]; .path == $f.file and .line == $f.line) then .inline = false else . end)' "$FINDINGS" | sed 's/--/–/g')"
     { printf '🛡️ **%s** — %s Code Review @ `%s`\n\n' "$BOT_NAME" "$emoji" "$sha7"
+      [ "$EVENT" = "$VERDICT" ] || own_pr_note "$VERDICT"
       cat "$BODY"
       if [ "$(printf '%s' "$2" | jq length)" -gt 0 ]; then
         printf '\n\n### Findings not anchorable inline\n\n'
@@ -1619,20 +1711,26 @@ cmd_post() {
       [ -n "$mj" ] && printf '<!-- review-meta: %s -->\n' "$mj" || :
       printf '<!-- %s headRefOid=%s -->\n' "$REVIEW_MARKER" "$sha"
     } > "$CTX/body.posted.md"
-    jq -Rs --arg sha "$sha" --arg ev "$VERDICT" --argjson c "$1" '{commit_id:$sha, event:$ev, body:., comments:$c}' "$CTX/body.posted.md" > "$PAYLOAD"
+    jq -Rs --arg sha "$sha" --arg ev "$EVENT" --argjson c "$1" '{commit_id:$sha, event:$ev, body:., comments:$c}' "$CTX/body.posted.md" > "$PAYLOAD"
   }
+  EVENT="$(review_event "$VERDICT")"
   build_payload "$comments" "$moved"
 
   # --- POST, with the documented 422 handling ---
   local resp err rc=0
   resp="$(gh api "repos/$REPO/pulls/$N/reviews" -X POST --input "$PAYLOAD" 2>"$CTX/post.err")" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    err="$(cat "$CTX/post.err" 2>/dev/null)"
+    # GitHub's error text: gh's message on stderr, the error body on stdout
+    err="$(cat "$CTX/post.err" 2>/dev/null; printf '\n%s' "$resp")"
     if printf '%s' "$err" | grep -qiE 'commit_id|not the latest|latest commit'; then
       release_lock "422 commit_id mismatch — HEAD moved at post time"; rm -f "$PAYLOAD"; cleanup
       out "$(jq -nc '{outcome:"aborted", reason:"422 commit_id mismatch"}')"
     fi
-    if printf '%s' "$err" | grep -qiE '"line"|position|diff' && [ "$(printf '%s' "$comments" | jq length)" -gt 0 ]; then
+    if [ "$EVENT" != COMMENT ] && own_pr_refused "$err"; then
+      # the account opened this PR: the retry posts the verdict as a COMMENT
+      EVENT=COMMENT; build_payload "$comments" "$moved"
+      logev warn post_retry "PR #$N: GitHub refused $VERDICT from the PR's own author — retrying as COMMENT"
+    elif printf '%s' "$err" | grep -qiE '"line"|position|diff' && [ "$(printf '%s' "$comments" | jq length)" -gt 0 ]; then
       # line-not-in-diff: every inline comment moves to the summary, one retry
       moved="$(jq -nc --argjson m "$moved" --argjson c "$comments" '$m + ($c | map(. + {reason:"422 line not in diff"}))')"
       comments='[]'; build_payload "$comments" "$moved"
@@ -1642,7 +1740,7 @@ cmd_post() {
     fi
     rc=0; resp="$(gh api "repos/$REPO/pulls/$N/reviews" -X POST --input "$PAYLOAD" 2>"$CTX/post.err")" || rc=$?
     if [ "$rc" -ne 0 ]; then
-      err="$(cat "$CTX/post.err" 2>/dev/null | tr '\n' ' ' | cut -c1-200)"
+      err="$({ cat "$CTX/post.err" 2>/dev/null; printf ' %s' "$resp"; } | tr '\n' ' ' | cut -c1-200)"
       logev error post_failed "PR #$N: review POST did not succeed after retry — $err"
       release_lock "post failed after retry"; rm -f "$PAYLOAD"; cleanup
       out "$(jq -nc --arg e "$err" '{outcome:"aborted", reason:"post failed after retry", error:$e}')"
@@ -1651,13 +1749,24 @@ cmd_post() {
   rm -f "$PAYLOAD"
   local rid url; rid="$(printf '%s' "$resp" | jq -r '.id // empty')"; url="$(printf '%s' "$resp" | jq -r '.html_url // empty')"
   logstep "$sha7 posted $VERDICT"
+  [ "$EVENT" = "$VERDICT" ] || logev warn review_pr "PR #$N: $VERDICT posted as COMMENT — this account opened the pull request"
 
   # --- trigger removal, stale-approval dismissal ---
-  local label_removed=false dismissed=null
-  if printf '%s' "$labels" | jq -e --arg x "$REREVIEW_LABEL" 'index($x) != null' >/dev/null 2>&1; then
-    if gh api -X DELETE "repos/$REPO/issues/$N/labels/$(uri "$REREVIEW_LABEL")" >/dev/null 2>&1; then label_removed=true
-    else logev warn label_remove "PR #$N: removing $REREVIEW_LABEL did not succeed"; fi
-  fi
+  local label_removed=false dismissed=null tl
+  for tl in "$REREVIEW_LABEL" ${REREVIEW_DELTA_LABEL:+"$REREVIEW_DELTA_LABEL"}; do
+    printf '%s' "$labels" | jq -e --arg x "$tl" 'index($x) != null' >/dev/null 2>&1 || continue
+    if gh api -X DELETE "repos/$REPO/issues/$N/labels/$(uri "$tl")" >/dev/null 2>&1; then label_removed=true
+    else logev warn label_remove "PR #$N: removing $tl did not succeed"; fi
+  done
+  # GitHub clears a review request only when the requested account reviews: a
+  # token that posts as another login (a GitHub App) removes it here
+  case "$TRIG" in (review-request|both)
+    if [ "$(token_login)" != "$BOT_LOGIN" ] \
+       && printf '%s' "$requested" | jq -e --arg x "$BOT_LOGIN" 'index($x) != null' >/dev/null 2>&1; then
+      gh api -X DELETE "repos/$REPO/pulls/$N/requested_reviewers" -f "reviewers[]=$BOT_LOGIN" >/dev/null 2>&1 \
+        || logev warn label_remove "PR #$N: removing the review request of $BOT_LOGIN did not succeed"
+    fi;;
+  esac
   [ "$VERDICT" = "APPROVE" ] || dismissed="$(dismiss_approvals "${rid:-0}" "$sha7" "$VERDICT" review)"
 
   # --- history (the body as posted), done row, terminal status, cleanup ---
@@ -1674,7 +1783,8 @@ cmd_post() {
   cleanup
   out "$(jq -nc --arg v "$VERDICT" --arg id "$rid" --arg u "$url" --argjson m "$moved" --argjson lr "$label_removed" --argjson d "${dismissed:-null}" \
     --argjson c "$c" --argjson w "$w" --argjson s "$s" --argjson took "$took" --argjson ab "${anchor_bad:-[]}" \
-    '{outcome:"posted", verdict:$v, review_id:(if $id=="" then null else ($id|tonumber) end), url:(if $u=="" then null else $u end),
+    --arg ev "$EVENT" \
+    '{outcome:"posted", verdict:$v, event:$ev, review_id:(if $id=="" then null else ($id|tonumber) end), url:(if $u=="" then null else $u end),
       moved_to_summary:$m, anchors_nulled:$ab, label_removed:$lr, dismissed_approval:$d, counts:{critical:$c, warning:$w, suggestion:$s}, took_minutes:$took}')"
 }
 
@@ -1911,6 +2021,18 @@ cmd_hold() {
   out "$(jq -nc --arg w "$why" '{outcome:"held_elsewhere", why:$w}')"
 }
 
+# One progress write outside a review — the status reset of
+# docs/review-bookkeeping.md → Progress signal on GitHub.
+cmd_progress() { # <sha> <state> <description> [target_url]
+  [ "$PROGRESS" = "enabled" ] || out '{"outcome":"disabled"}'
+  case "${1:-}" in (''|*[!0-9a-f]*) fail "progress: the sha is not hex";; esac
+  case "${2:-}" in (pending|success) ;; (*) fail "progress: the state is not pending or success";; esac
+  local desc; desc="$(printf '%s' "${3:-}" | tr -cd '\11\12\15\40-\176' | cut -c1-138)"
+  if progress_write "$1" "$2" "$desc" "${4:-}"; then out '{"outcome":"written"}'; fi
+  logev warn progress_status "PR #$N: progress write did not succeed ($2: $desc)"
+  out '{"outcome":"failed"}'
+}
+
 # A bookkeeping row (docs/review-bookkeeping.md): written or deleted under the
 # same lock as every row the review steps write.
 cmd_row() {
@@ -1971,7 +2093,9 @@ cmd_fix_start() {
   mkdir -p "$WORK/reviews"
   printf '<!-- agent-fix: %s -->\n' "$sha" >> "$WORK/reviews/pr-$N.md"
   git -C "$FIX_DIR" config user.name "$BOT_NAME"
-  git -C "$FIX_DIR" config user.email "${BOT_LOGIN:-code-guardian}@users.noreply.$REPO_HOST"
+  # the account that pushes: the token's login, else bot_login
+  local who; who="$(token_login)"; who="${who:-${BOT_LOGIN:-code-guardian}}"
+  git -C "$FIX_DIR" config user.email "$(noreply_email "$who" "$REPO_HOST")"
   printf '%s\n' "$sha" > "$FIX_DIR/.git/cg-fix-sha"; printf '%s\n' "$ref" > "$FIX_DIR/.git/cg-fix-ref"
   logev info agent_fix "PR #$N: fix round started at ${sha:0:7}"
   out "$(jq -nc --arg c "$FIX_DIR" --arg r "$ref" --arg s "$sha" '{outcome:"ready", clone:$c, branch:$r, sha:$s}')"
@@ -2052,7 +2176,7 @@ case "$CMD" in
   (context) cmd_context "$@";; (sweep) cmd_sweep "$@";;
   (collect) cmd_collect "$@";; (delta) cmd_delta "$@";; (compose-brief) cmd_compose_brief "$@";;
   (rapid) cmd_rapid "$@";; (post) cmd_post "$@";; (ci) cmd_ci "$@";; (verify) cmd_verify;;
-  (abort) cmd_abort "$@";; (hold) cmd_hold;; (release) cmd_release;; (row) cmd_row "$@";;
+  (abort) cmd_abort "$@";; (hold) cmd_hold;; (release) cmd_release;; (row) cmd_row "$@";; (progress) cmd_progress "$@";;
   (fix-start) cmd_fix_start "$@";; (fix-push) cmd_fix_push "$@";;
   (merge) cmd_merge "$@";;
 esac

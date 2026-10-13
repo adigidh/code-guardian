@@ -153,11 +153,12 @@ Per sampled review, from `reviews/pr-<n>.md`, cross-checked on GitHub:
 
 ### E. Artifact pipeline (when `artifact_skill` is configured)
 
-18. PRs with `$BOT_LOGIN` assigned right now that are **not** in this run's
-    `artifacts_due`-equivalent state (assignment older than a few heartbeats
+18. PRs with an artifact trigger right now — `$BOT_LOGIN` assigned or
+    `artifact_label` on the PR — that are **not** in this run's
+    `artifacts_due`-equivalent state (a trigger older than a few heartbeats
     with neither markers nor a fresh artifact) → pipeline stuck, **warn**.
-19. Repeated `retry_unassign` lines across the week for the same PR → the
-    unassign keeps failing (permissions?), **warn**.
+19. Repeated `artifact trigger release retried` lines across the week for the
+    same PR → the release keeps failing (permissions?), **warn**.
 
 ### F. Configuration & definition integrity
 
@@ -285,7 +286,7 @@ measurement.
     no `tokens` event: report it as "≥", and never read a low figure as a
     cheap week when `by_cause.hard_kill` is non-zero.
 30. **Reaction feedback** — `stats.reactions` sums 👍/👎 on the bot's latest
-    inline and issue comments. For each `down_urls` entry (≤ 10): read the
+    inline and issue comments ([github-access.md](github-access.md) → **Own content**). For each `down_urls` entry (≤ 10): read the
     thread; an explicit correction or dismissal → record it per
     [preferences.md](preferences.md) and give the report one line per recorded
     lesson. A 👎 with no readable reason is reported as-is, never guessed at.

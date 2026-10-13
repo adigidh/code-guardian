@@ -668,6 +668,72 @@ run_preflight audit
 assert_jq '.stats.reactions == {up: 3, down: 1, down_urls: ["https://example.test/rc/1"], scanned: 2}' \
   'reactions summed over bot comments only, 👎 URLs listed'
 
+# --- an alias's comments count only as part of a marked review ---------------
+# a shared GitHub App also posts for other agents: its inline comment of an
+# unmarked review and its unmarked issue comment are not the bot's
+new_case audit_reactions_alias
+base_config
+seed_identity 'acme-app[bot]'
+pr_json 1 "open PR" '[]' "1111111111111111111111111111111111111111" | open_prs_fx
+fx 'api repos/acme/widgets/pulls/comments?per_page=100&sort=created&direction=desc' <<'EOF'
+[
+ {"user":{"login":"acme-app[bot]"},"pull_request_review_id":700,"pull_request_url":"https://api.github.com/repos/acme/widgets/pulls/9","html_url":"https://example.test/rc/1","reactions":{"+1":2,"-1":1}},
+ {"user":{"login":"acme-app[bot]"},"pull_request_review_id":701,"pull_request_url":"https://api.github.com/repos/acme/widgets/pulls/9","html_url":"https://example.test/rc/2","reactions":{"+1":5,"-1":5}}
+]
+EOF
+fx 'api repos/acme/widgets/issues/comments?per_page=100&sort=created&direction=desc' <<'EOF'
+[
+ {"user":{"login":"acme-app[bot]"},"html_url":"https://example.test/c/3","reactions":{"+1":7}}
+]
+EOF
+printf '{"id":700,"body":"review\\n<!-- cg:review headRefOid=aaa -->"}' | fx 'api repos/acme/widgets/pulls/9/reviews/700'
+printf '{"id":701,"body":"another agent"}' | fx 'api repos/acme/widgets/pulls/9/reviews/701'
+run_preflight audit
+assert_jq '.stats.reactions == {up: 2, down: 1, down_urls: ["https://example.test/rc/1"], scanned: 1}' \
+  'only the alias comment of a marked review counts'
+
+# --- an unreadable bot review makes the reaction scan unmeasured ---------------
+new_case audit_reactions_review_unreadable
+base_config
+seed_identity 'acme-app[bot]'
+pr_json 1 "open PR" '[]' "1111111111111111111111111111111111111111" | open_prs_fx
+printf '[{"user":{"login":"acme-app[bot]"},"pull_request_review_id":700,"pull_request_url":"https://api.github.com/repos/acme/widgets/pulls/9","html_url":"https://example.test/rc/1","reactions":{"+1":2}}]' \
+  | fx 'api repos/acme/widgets/pulls/comments?per_page=100&sort=created&direction=desc'
+fx_fail 'api repos/acme/widgets/pulls/9/reviews/700' 1
+run_preflight audit
+assert_jq '.stats.reactions.scanned == null' 'an unread review is unmeasured, not zero'
+
+# --- a GitHub App token: authenticated, no scope check ------------------------
+new_case audit_app_token
+base_config
+pr_json 1 "open PR" '[]' "1111111111111111111111111111111111111111" | open_prs_fx
+printf '{"data":{"viewer":{"login":"acme-app[bot]"}}}' | fx 'api --hostname github.com graphql -f query={viewer{login}}'
+run_preflight audit
+assert_jq '.checks[] | select(.id == "github_auth") | .status == "ok" and (.detail | test("GitHub App"))' 'an App login authenticates whatever bot_login names'
+assert_jq '.checks[] | select(.id == "token_scopes") | .status == "ok" and (.detail | test("GitHub App"))' \
+  'an App token skips the scope check'
+
+new_case audit_unknown_login
+base_config
+pr_json 1 "open PR" '[]' "1111111111111111111111111111111111111111" | open_prs_fx
+printf '{"data":{"viewer":{"login":"mallory"}}}' | fx 'api --hostname github.com graphql -f query={viewer{login}}'
+run_preflight audit
+assert_jq '.checks[] | select(.id == "github_auth") | .status == "warn" and (.detail | test("expected test-bot"))' \
+  'a user token of another account warns'
+
+# --- a connection change is recorded and asks for the access check -----------
+new_case audit_identity_changed
+base_config
+pr_json 1 "open PR" '[]' "1111111111111111111111111111111111111111" | open_prs_fx
+seed_identity test-bot
+printf '{"data":{"viewer":{"login":"acme-app[bot]"}}}' | fx 'api graphql -f query={viewer{login}}'
+run_preflight audit
+assert_jq '.checks[] | select(.id == "github_identity") | .status == "warn" and (.detail | test("github-access.sh"))' \
+  'the audit names the changed connection'
+jq -e '.login == "acme-app[bot]" and .kind == "app" and .previous.login == "test-bot" and (.changed_at | length > 0)' "$WORK/GITHUB.json" >/dev/null \
+  && printf 'ok   %s: the cache records the previous login\n' "$CASE" \
+  || { printf 'FAIL %s: GITHUB.json %s\n' "$CASE" "$(cat "$WORK/GITHUB.json")"; FAILED=1; }
+
 # --- a realistic comment payload still gets scanned ---------------------------
 # two pages of real comments are ~768 KB; passed as jq arguments they exceed
 # MAX_ARG_STRLEN (128 KiB per single argument on Linux, independent of the much
@@ -879,7 +945,7 @@ eva preflight info "PR #12: artifact generate due"                    86500
 eva artifact  info "PR #13: pr-artifact published → DAM ccc"          1814400 # outside the window
 eva preflight info "PR #14: artifact generate due"                    43200   # never reported an outcome
 eva preflight info "PR #15: artifact generate due"                    600     # still due, next heartbeat takes it
-eva artifact  info "PR #16: artifact unassign retried (ok)"           86400   # neither a publish nor a skip
+eva artifact  info "PR #16: artifact trigger release retried (ok)"    86400   # neither a publish nor a skip
 eva preflight info "PR #17: artifact generate due"                    86500
 eva artifact  info "PR #17: pr-artifact published → DAM ddd, 2 redacted" 86400 # outcome word after the skill name
 run_preflight audit

@@ -45,9 +45,10 @@ a. **Prepare** — `review-pr.sh prepare <n>` (`--eta <eta_seconds>` under
      **Clone, credential helper, cleanup**), and renders the per-skill copies,
      briefs, context pack and risk prescan.
 
-   The live trigger follows `rereview_trigger` and sets the scope: label →
-   `full: true`, else delta ([review-rereview.md](review-rereview.md) →
-   **Re-review output**). The JSON also carries `kind`, `full`, `urgent`,
+   The live trigger follows `rereview_trigger` and `rereview_delta_label` and
+   sets the scope: `rereview_label` → `full: true`, else delta
+   ([review-rereview.md](review-rereview.md) → **Re-review output**). The
+   JSON also carries `kind`, `full`, `urgent`,
    `prior`, `prior_findings`, `carry`, `delta`, `files[]`, `skills{}`,
    `profile_slice`, `history_slice`, `memory_due`, `structure_changed`,
    `rapid_posted` and `paths`. `urgent: true` without `rapid_posted` →
@@ -101,11 +102,12 @@ f. **Post** — `review-pr.sh post <n> --verdict <VERDICT> --body <ctx>/body.md
    `--findings <ctx>/findings.annotated.json`. It runs Check 2 and the dedup
    re-check, maps the inline comments
    ([review-mechanics.md](review-mechanics.md) → **Mapping findings to inline
-   comments**), posts the payload, removes `$REREVIEW_LABEL`, dismisses stale
-   approvals, appends the body to `reviews/pr-<n>.md`, writes the `done` row
-   and terminal status, logs `posted <verdict>` and `done`, and deletes clone,
-   copies, diff and state — exactly once. Outcomes: `posted` (`url`,
-   `moved_to_summary`, `anchors_nulled`, `label_removed`,
+   comments**), posts the payload, removes the served triggers
+   ([review-bookkeeping.md](review-bookkeeping.md) → **Trigger removal**),
+   dismisses stale approvals, appends the body to `reviews/pr-<n>.md`, writes
+   the `done` row and terminal status, logs `posted <verdict>` and `done`, and
+   deletes clone, copies, diff and state — exactly once. Outcomes: `posted`
+   (`url`, `event`, `moved_to_summary`, `anchors_nulled`, `label_removed`,
    `dismissed_approval`) · `aborted` (**Error handling**) · `duplicate` (the
    marker is already on GitHub; the row self-heals with its timestamp) ·
    `closed_*` (read [review-urgent.md](review-urgent.md) → **PR closed
@@ -416,6 +418,9 @@ code that moved past its override lets the finding surface normally.
   and retries the POST once (`moved_to_summary`, reason
   `422 line not in diff`); note the moved comments once in the chat UI.
 - **422 commit_id mismatch** → HEAD moved: `post` aborts as a Check 2 failure.
+- **422 own pull request** → the token's login opened the PR: `post` retries
+  once as `COMMENT` ([github-access.md](github-access.md) → **Own pull
+  request**).
 
 ## Review-run self-check
 

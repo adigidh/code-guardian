@@ -29,7 +29,9 @@ leave the entry to the next run):
    add the label again.
 2. In `clone`, follow the bundled `review-remediation` skill
    (`.agents/skills/review-remediation/SKILL.md`) for the agent's last review
-   (`review-worklist.sh <owner/repo> <n> --reviewer <bot_login>`), with these
+   (`review-worklist.sh <owner/repo> <n> --reviewer <login> --marker
+   <review_marker>`, where `<login>` is `config.github_identity.login`, the
+   login the token posts as, or `bot_login` when it is null), with these
    limits: fix only blocking findings whose fix the review states,
    change only the files those findings name, and never answer a disputable
    finding — list it in the comment for the author. The skill's reading and

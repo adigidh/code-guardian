@@ -13,12 +13,14 @@ never fatal — preflight re-emits the entry.
   `review-pr.sh row <number> <sha> <ts> SEE-GITHUB <status>`. `ts` is the
   GitHub-reported timestamp; use the remote body's verdict when you have it.
   Log `PR #<n>: self-healed REVIEWS.md from remote marker (<status>)`.
-- **Same-SHA trigger cleanup** `{number, label, request}` → a trigger on a PR
-  whose live HEAD is reviewed and whose description is unchanged since. Clear
-  what the entry flags — `label: true` → remove the label, `request: true` →
-  remove your pending review request (**Trigger removal**) — post nothing, and
-  log `PR #<n>: re-review trigger present but nothing new since <short-sha> —
-  cleared (<label / request / label + request>), no re-review`. An edited
+- **Same-SHA trigger cleanup** `{number, label, request, delta_label}` → a
+  trigger on a PR whose live HEAD is reviewed and whose description is
+  unchanged since. Clear what the entry flags — `label: true` → remove
+  `$REREVIEW_LABEL`, `delta_label: true` → remove `$REREVIEW_DELTA_LABEL`,
+  `request: true` → remove your pending review request (**Trigger removal**) —
+  post nothing, and log `PR #<n>: re-review trigger present but nothing new
+  since <short-sha> — cleared (<the cleared triggers, joined by " + ">), no
+  re-review`. An edited
   description arrives as a `reviews_due` entry instead
   ([review-rereview.md](review-rereview.md) → **Description-only re-review**).
 
@@ -53,8 +55,12 @@ gh api -X DELETE "repos/$REPO/issues/<n>/labels/$(jq -rn --arg v "$REREVIEW_LABE
   || gh pr edit <n> --repo "$REPO" --remove-label "$REREVIEW_LABEL"
 ```
 
-Pending review request — same-SHA cleanup only; a served request clears itself
-when the review posts:
+`$REREVIEW_DELTA_LABEL` the same way. `review-pr.sh post` removes both labels
+when the review posts.
+
+Pending review request — a served request clears itself when `bot_login` posts
+the review. When the token posts as another login (a GitHub App token),
+`review-pr.sh post` removes it. The same-SHA cleanup removes it with:
 
 ```bash
 gh api -X DELETE "repos/$REPO/pulls/<n>/requested_reviewers" -f "reviewers[]=$BOT_LOGIN" >/dev/null
@@ -62,17 +68,22 @@ gh api -X DELETE "repos/$REPO/pulls/<n>/requested_reviewers" -f "reviewers[]=$BO
 
 ## Progress signal on GitHub (`review_progress`)
 
-`review_progress: enabled` (missing = `disabled`) publishes progress as a
-**commit status** on the reviewed SHA. One call per update, `context` =
-`$REVIEW_MARKER`:
+`review_progress: enabled` (missing = `disabled`) publishes progress on the
+reviewed SHA under the name `$REVIEW_MARKER`: a **check run** for a GitHub App
+token, a **commit status** for a user token, the other one when the first is
+refused ([github-access.md](github-access.md) → **Progress signal channel**).
+`pending` is a check run `in_progress` and `success` a completed one. One write
+per update, always through the script:
 
 ```bash
-gh api -X POST "repos/$REPO/statuses/<sha>" -f state=<state> \
-  -f context="$REVIEW_MARKER" -f description="<line>" >/dev/null
+bash "$HOME/scripts/review-pr.sh" progress <n> <sha> <state> "<line>" [<url>]
 ```
 
-Add `-f target_url=<url>` on the rows that have one. `description` is one short
-line — GitHub truncates past 140 characters.
+`<url>` is the row's `target_url`. `description` is one short line — GitHub
+truncates past 140 characters. A check run also keeps every line as a timeline
+in its summary and tells people how to request the next round
+([github-access.md](github-access.md) → **Progress signal channel**). The CI rollup never counts this signal as a
+check of the commit ([ci-triage.md](ci-triage.md)).
 
 | Written at | `state` | `description` | `target_url` |
 | --- | --- | --- | --- |
@@ -92,7 +103,7 @@ line — GitHub truncates past 140 characters.
 - Every terminal outcome is `success`, aborts included, so the status never
   gates a merge.
 - `review-pr.sh` writes each row at the step that owns it; the manual fallback
-  issues the same call at the same step.
+  runs `review-pr.sh progress` at the same step.
 - **Best-effort.** A failed write is logged (`progress_status`, warn) and
   changes nothing — never retried, never a reason to abort.
 

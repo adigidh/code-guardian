@@ -58,6 +58,31 @@ run_preflight review
 assert_jq '.mentions_due | length == 1' 'reply to bot thread due'
 assert_jq '.mentions_due[0] | .comment_id == 201 and .thread == "inline" and .in_reply_to == 200' 'inline entry fields'
 
+# --- reply in an App-rooted thread: due only when its review is marked --------
+new_case alias_thread_reply
+base_config
+seed_identity 'acme-app[bot]'
+{ rc_comment 200 'acme-app[bot]' Bot "🟡 **Warning:** unchecked null" 9 null | jq '.pull_request_review_id = 700'
+  rc_comment 201 bob User "this is intentional" 9 200
+  rc_comment 210 'acme-app[bot]' Bot "another agent's note" 9 null | jq '.pull_request_review_id = 701'
+  rc_comment 211 carol User "thanks" 9 210; } | rc_fx
+printf '{"id":700,"body":"review\\n<!-- cg:review headRefOid=aaa -->"}' | fx 'api repos/acme/widgets/pulls/9/reviews/700'
+printf '{"id":701,"body":"another agent"}' | fx 'api repos/acme/widgets/pulls/9/reviews/701'
+run_preflight review
+assert_jq '[.mentions_due[].comment_id] == [201]' 'only the reply under a marked alias review is due'
+assert_jq '.config.github_identity == {login:"acme-app[bot]", kind:"app"}' 'the token identity in the worklist config'
+
+# --- an unreadable thread-root review: not due now, retried next run ----------
+new_case bot_thread_review_unreadable
+base_config
+seed_identity 'acme-app[bot]'
+{ rc_comment 200 'acme-app[bot]' Bot "🟡 **Warning:** unchecked null" 9 null | jq '.pull_request_review_id = 700'
+  rc_comment 201 bob User "this is intentional" 9 200; } | rc_fx
+fx_fail 'api repos/acme/widgets/pulls/9/reviews/700' 1
+run_preflight review
+assert_jq '.mentions_due == []' 'no reply is due on an unread review'
+assert_jq '[.logs[] | select(test("unreadable — reply 201 retried next run"))] | length == 1' 'the skip is logged'
+
 # --- reply in a human-rooted thread + a Bot-type author → nothing --------------
 new_case irrelevant_comments
 base_config
@@ -217,5 +242,16 @@ printf '{"permission":"read","role_name":"read"}' | fx "api repos/$TEST_REPO/col
 printf '{"private":false}' | fx "api repos/$TEST_REPO"
 run_preflight review
 assert_jq '.mentions_due | length == 0' 'read on a public repository is every account'
+
+# --- a GitHub App bot_login: people mention its slug, with or without [bot] ----
+new_case app_bot_login_mentions
+base_config
+sed -i.bak 's/^- bot_login: test-bot$/- bot_login: acme-app[bot]/' "$WORK/CONFIG.md"
+{ ic_comment 301 alice User "@acme-app please re-review" 7
+  ic_comment 302 bob User "cc @acme-app[bot]: is this right?" 8
+  ic_comment 303 carol User "@acme-application is another account" 9
+  ic_comment 304 dave User "@acme-appx is not the bot" 10; } | ic_fx
+run_preflight review
+assert_jq '[.mentions_due[].comment_id] == [301, 302]' 'the slug and the [bot] login are mentions, longer logins are not'
 
 finish

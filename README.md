@@ -34,8 +34,9 @@ optional active window checks hourly in the quiet hours outside it.
 PR what is due:
 
 - Never-reviewed PRs get a first review automatically. Already-reviewed PRs get
-  a re-review **only on an explicit trigger** — the `rereview_label`, or
-  GitHub's "Re-request review" when `rereview_trigger` enables it. New commits
+  a re-review **only on an explicit trigger** — the `rereview_label`, the
+  optional `rereview_delta_label`, or GitHub's "Re-request review" when
+  `rereview_trigger` enables it. New commits
   alone just flip the tracking row to `awaiting_label`.
 - Same-HEAD PRs are skipped via `work/REVIEWS.md` plus the remote dedup-marker
   check, with self-heal. Closed and merged PRs are verified per PR and queued
@@ -49,8 +50,8 @@ PR what is due:
   the hidden dedup marker), label bookkeeping, and tracking in
   `work/REVIEWS.md` and `work/reviews/pr-<number>.md`. Reviews are concise and
   assume agent-written, agent-read code. Re-review scope follows the trigger:
-  the label asks for the whole PR again, a review request or on-demand ask for
-  the delta only.
+  the label asks for the whole PR again, a review request, the delta label or
+  an on-demand ask for the delta only.
 - The same heartbeat answers comments and PR descriptions addressed to the bot:
   questions get a reply, explicit review feedback is recorded to memory and
   confirmed in the reply, and "please re-review" is served on demand
@@ -220,13 +221,14 @@ what it can and asking for the rest. Per-key semantics are in
 | `work_repo` | Step 0 answer (optional) | Repo backing `work/` up (`[host/]owner/repo`); omitted = local-only persistence (`docs/persistence.md`). |
 | `definition_repo` | derived from the ONBOARDING.md URL, host included | The repo this definition came from (fork-aware) — outer-repo `origin`, target of definition PRs, review-footer link. |
 | `definition_branch` | derived from the ONBOARDING.md URL, else `main` | Branch of `definition_repo` **this instance runs from**. A per-agent deployment choice; definition PRs are still based on `main`. |
-| `bot_login` | auto-detected via `gh api user`, confirmed | GitHub login the agent acts as — artifact assignee gate, "independent reviewer" classification. |
+| `bot_login` | auto-detected via GraphQL `viewer` (else `gh api user`), confirmed | GitHub account people mention, assign and request — artifact assignee gate, "independent reviewer" classification. A GitHub App token can post beside a user `bot_login`; an App `bot_login` uses the labels (`docs/github-access.md` → **Triggers by identity**). |
 | `bot_display_name` | asked (default `Code Guardian`) | Name the agent signs reviews with. Cosmetic only. |
 | `review_marker` | asked (default `code-guardian:review`) | Prefix of the hidden dedup marker in every posted review. **Immutable once the first review is posted.** |
 | `rereview_label` | asked (default `code-guardian-review`) | PR label that requests a **complete** re-review. Without a trigger, new commits are not re-reviewed. The agent removes the label once the re-review is posted. |
-| `rereview_trigger` | asked with `rereview_label` (default `label`) | How re-reviews are requested: `label`, `review-request` (needs the bot as a collaborator), or `both`. A served review request clears itself. |
+| `rereview_trigger` | asked with `rereview_label` (default `label`) | How re-reviews are requested: `label`, `review-request` (needs the bot as a collaborator), or `both`. A served review request clears itself. A GitHub App `bot_login` is label-only. |
+| `rereview_delta_label` | asked (default off) | PR label that requests a **delta** re-review — the changes since the last review, as a review request does. The delta trigger of a GitHub App `bot_login`. The agent removes it once the re-review is posted. |
 | `urgent_label` | asked with the labels (default off) | Optional **human-managed** label marking a PR urgent: its due reviews jump the queue and run rapid-first (a rapid pass without a critical finding approves), and with Slack enabled a newly urgent PR gets one immediate mention-free channel alert (`docs/review-urgent.md` → **Urgent PRs**). |
-| `review_progress` | asked (default `disabled`) | Publishes each review's progress to the PR as a commit status on the reviewed SHA (`docs/review-bookkeeping.md` → **Progress signal on GitHub**). Always `success` when it finishes, so it never gates a merge; the `context` is the instance's `review_marker`. |
+| `review_progress` | asked (default `disabled`) | Publishes each review's progress to the PR as a check run (GitHub App) or a commit status (user token) on the reviewed SHA (`docs/review-bookkeeping.md` → **Progress signal on GitHub**). Always `success` when it finishes, so it never gates a merge; the `context` is the instance's `review_marker`. |
 | `ci_triage` | asked (default `disabled`) | After a review posts, a failing check on the reviewed SHA gets one comment with the probable cause and the smallest fix (`docs/ci-triage.md`). Reads and explains only — it never restarts a job, changes a label, or changes a verdict. |
 | `review_dispatch` | asked (default `enabled`) | A heartbeat that finds several PRs keeps its first and starts every other PR at once in a one-time session of its own (`docs/worklist.md` → **Dispatch**); `disabled` keeps them in the run, one after another. |
 | `review_model` | asked (default `opus`) | The model every scheduled session runs on — each registered schedule and each dispatched review carries it; `default` pins none and leaves the choice to the platform (`docs/config.md`). The weekly audit flags a schedule or a run on another model. |
@@ -234,6 +236,7 @@ what it can and asking for the rest. Per-key semantics are in
 | `mention_authors` | asked (default `collaborators`) | Whose GitHub mentions are handled: repository owners, members and collaborators, or `anyone` (`docs/config.md`). |
 | `project_profile` | asked (default `enabled`) | Generated map of the reviewed repository (`work/PROFILE.md`), kept current by a structural fingerprint and handed to every review and skill subagent — orientation only, never evidence (`docs/profile.md`). |
 | `artifact_skill` | defaulted to `pr-artifact@dam-agents/dam` | Visual-artifact skill with its own source (`<skill>@<[host/]owner/repo>`), published to the DAM Artifact Library (best-effort behind the owner's experimental flag); `none` disables the feature. |
+| `artifact_label` | asked with the artifact skill (default off) | PR label that requests the visual artifact, beside the assignment of `bot_login` — the artifact trigger of a GitHub App `bot_login`. The agent removes it once the artifact is published. |
 | `## Review skills` table | defaulted to the public set (issue-fit + doc-drift + typescript-engineering + react-ui-engineering), operator-adjustable, every row validated | Per-PR review skills: name, **per-skill source** (`[host/]owner/repo`, or `harness`), trigger (`always` or an extension list), and the review-section heading. The definition holds the mechanics; this table defines *what* runs *when* and *from where*. |
 | `## Watch rules` table | not filled — added later in chat when a team asks | Instance-local "when a PR does X, give a heads-up in Y" rules, delivered to vetted targets: chat UI, a Slack channel, or a PR comment (`docs/watches.md`). Keeps team-specific triggers out of this public definition. |
 | `slack_notifications` | asked (default `disabled`) | Gates all Slack activity (shepherd nudging, watch notifications). |
@@ -280,10 +283,13 @@ what it can and asking for the rest. Per-key semantics are in
   (`gh auth login --hostname <host>`, operator-only) and reachable from the
   pod; a non-`github.com` target host is persisted as `GH_HOST` at onboarding.
 - **GitHub identity:** the agent posts reviews and comments as the
-  account behind its token. Use a **dedicated machine or bot account**, not a
+  account behind its token — a user token or a GitHub App installation token,
+  both supported (`docs/github-access.md`). Use a **dedicated machine or bot account**, not a
   personal one, that is a collaborator on the target repo with permission to
   review PRs. GitHub ignores review requests and approvals from a PR's own
-  author, so the bot account must not open the PRs it reviews.
+  author, so the bot account must not open the PRs it reviews. When it does —
+  one GitHub App that opens and reviews PRs — the agent posts its verdict as a
+  comment (`docs/github-access.md` → **Own pull request**).
 - **Token scopes** — the single place these are specified:
 
   | Scope | Required? | What needs it |
@@ -293,7 +299,9 @@ what it can and asking for the rest. Per-key semantics are in
 
   The audit's `token_scopes` check asserts the required ones only. A missing
   scope is **operator-only** to fix: the agent reports it and never works
-  around it.
+  around it. A fine-grained or **GitHub App** token has permissions in place
+  of scopes — the list and the access check that reads them are in
+  `docs/github-access.md` → **Feature map**.
 - **External services:** artifacts and reports publish to the platform's DAM
   Artifact Library (best-effort, behind the owner's experimental flag), whose
   `visibility:"public"` share URL is reachable by anyone holding it. The HTML
@@ -302,7 +310,8 @@ what it can and asking for the rest. Per-key semantics are in
 ### Connections
 
 - A **GitHub** connection must be granted so `gh` can authenticate (the Envoy
-  sidecar injects the OAuth token on outbound GitHub requests). The same token
+  sidecar injects the token, a user's or a GitHub App's, on outbound GitHub
+  requests). The same token
   serves the target repo, the `work_repo` backup and the definition repo.
 - A **Slack** connection is **optional**, needed only when Slack notifications
   are enabled, so `mcp__platform-outbound__send_channel_message` can reach the
@@ -383,8 +392,10 @@ only via this backup or the configured output surfaces (`docs/runbook.md` →
   [`review-remediation`](.agents/skills/review-remediation/SKILL.md), the
   author side — install it in whichever agent answers the reviews, to fix
   every blocking finding at every location and run the checks the review
-  carries; and [`pr-open`](.agents/skills/pr-open/SKILL.md), its first-push
-  counterpart — it self-reviews the branch and writes a PR body with the
+  carries. It tells reviewers apart by login and review marker, so a GitHub
+  App login that posts for several agents works too.
+  [`pr-open`](.agents/skills/pr-open/SKILL.md) is its first-push
+  counterpart: it self-reviews the branch and writes a PR body with the
   scope, a guide for a human reviewer and the person's decisions in a hidden
   `author-decisions` block, which the reviewer reads.
 - [`ONBOARDING.md`](ONBOARDING.md) — the first-run setup runbook; it also

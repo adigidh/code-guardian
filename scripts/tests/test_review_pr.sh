@@ -692,7 +692,105 @@ assert_file_contains "$WORK/reviews/pr-1.md" '"rereview":{"trigger":"label","lab
 grep -q 'review-meta' "$SANDBOX/body.md" && { printf 'FAIL %s: review-meta reached the composed body\n' "$CASE"; FAILED=1; } || printf 'ok   %s: review-meta is never part of the rendered review\n' "$CASE"
 assert_event 'posted REQUEST_CHANGES' 'posted event'
 assert_event "${B1_SHA:0:7} done" 'done event'
+
+# --- post: a pull request this account opened gets the verdict as a COMMENT -----
+own_pr_fx() { # the live PR opened by the GitHub App the token acts as
+  local f; f="$GH_FIXTURES/$(fx_for 'api repos/acme/widgets/pulls/1')"
+  jq '.user.login = "acme-app[bot]"' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+}
+setup post_own_pr
+seed_identity 'acme-app[bot]'
+pr_fx open; own_pr_fx
+run_rp prepare 1
+printf '### Summary\nx\n### Verdict\nREQUEST_CHANGES — fix it\n' > "$SANDBOX/body.md"
+printf '[{"status":"new","severity":"critical","file":"src/alpha.ts","line":6,"inline":false,"summary":"q","fix":"f"}]' > "$SANDBOX/findings.json"
+printf '{"id":81,"html_url":"https://example.test/r/81","state":"COMMENTED"}' | fx "$(POST_SLUG)"
+run_rp post 1 --verdict REQUEST_CHANGES --body "$SANDBOX/body.md" --findings "$SANDBOX/findings.json"
+assert_jq '.outcome == "posted" and .verdict == "REQUEST_CHANGES" and .event == "COMMENT"' 'the verdict stays, the event is a comment'
+jq -e -s 'any(.[]; .event == "COMMENT" and (.body | contains("**Verdict: REQUEST_CHANGES.** This account opened the pull request.")))' "$SANDBOX/gh.log.input" >/dev/null \
+  && printf 'ok   %s: the body names the verdict GitHub did not take\n' "$CASE" \
+  || { printf 'FAIL %s: payload %s\n' "$CASE" "$(cat "$SANDBOX/gh.log.input" 2>/dev/null)"; FAILED=1; }
+[ "$(grep -c 'reviews -X POST' "$SANDBOX/gh.log")" -eq 1 ] && printf 'ok   %s: one POST, no retry\n' "$CASE" \
+  || { printf 'FAIL %s: POST count %s\n' "$CASE" "$(grep -c 'reviews -X POST' "$SANDBOX/gh.log")"; FAILED=1; }
+assert_file_contains "$WORK/REVIEWS.md" "| 1 | $B1_SHA | .* | REQUEST_CHANGES | done |" 'the row keeps the verdict'
+
+# --- the same refusal without an identity cache: the one retry is a COMMENT -----
+# gh prints the refusal in the error body on stdout; stderr has the message only
+own_pr_422_fx() {
+  fx_fail_once "$(POST_SLUG)" 1
+  fx_err "$(POST_SLUG)" 'gh: Unprocessable Entity (HTTP 422)'
+  fx_out "$(POST_SLUG)" '{"message":"Unprocessable Entity","errors":["Review Can not approve your own pull request"],"status":"422"}'
+}
+setup post_own_pr_422
+pr_fx open; own_pr_fx
+run_rp prepare 1
+printf '### Summary\nx\n### Verdict\nAPPROVE — fine\n' > "$SANDBOX/body.md"
+printf '[]' > "$SANDBOX/findings.json"
+printf '{"id":82,"html_url":"https://example.test/r/82","state":"COMMENTED"}' | fx "$(POST_SLUG)"
+own_pr_422_fx
+run_rp post 1 --verdict APPROVE --body "$SANDBOX/body.md" --findings "$SANDBOX/findings.json"
+assert_jq '.outcome == "posted" and .verdict == "APPROVE" and .event == "COMMENT"' 'the refusal turns the retry into a comment'
+jq -e -s '[.[] | .event] == ["APPROVE", "COMMENT"]' "$SANDBOX/gh.log.input" >/dev/null \
+  && printf 'ok   %s: first APPROVE, then COMMENT\n' "$CASE" \
+  || { printf 'FAIL %s: events %s\n' "$CASE" "$(jq -c -s '[.[] | .event]' "$SANDBOX/gh.log.input" 2>/dev/null)"; FAILED=1; }
+
+# --- a pull request someone else opened keeps the verdict as the event ----------
+setup post_other_author
+seed_identity 'acme-app[bot]'
+pr_fx open
+run_rp prepare 1
+printf '### Summary\nx\n### Verdict\nAPPROVE — fine\n' > "$SANDBOX/body.md"
+printf '[]' > "$SANDBOX/findings.json"
+printf '{"id":83,"html_url":"https://example.test/r/83","state":"APPROVED"}' | fx "$(POST_SLUG)"
+run_rp post 1 --verdict APPROVE --body "$SANDBOX/body.md" --findings "$SANDBOX/findings.json"
+assert_jq '.outcome == "posted" and .event == "APPROVE"' 'an App reviewing another author approves'
+
+# --- post: the delta label is a trigger the post removes ------------------------
+setup post_delta_label '- rereview_delta_label: cg-delta'
+pr_fx open '["cg-delta"]'
+run_rp prepare 1
+printf '### Summary\nx\n### Verdict\nCOMMENT\n' > "$SANDBOX/body.md"
+printf '[]' > "$SANDBOX/findings.json"
+printf '{"id":79,"html_url":"https://example.test/r/79","state":"COMMENTED"}' | fx "$(POST_SLUG)"
+run_rp post 1 --verdict COMMENT --body "$SANDBOX/body.md" --findings "$SANDBOX/findings.json"
+assert_jq '.outcome == "posted" and .label_removed == true' 'the delta label counts as the removed trigger'
+assert_call '-X DELETE repos/acme/widgets/issues/1/labels/cg-delta' 'the delta label DELETE issued'
+grep -q 'labels/cg-rereview' "$SANDBOX/gh.log" \
+  && { printf 'FAIL %s: a label that is not on the PR was deleted\n' "$CASE"; FAILED=1; } \
+  || printf 'ok   %s: only the labels on the PR are removed\n' "$CASE"
+assert_file_contains "$WORK/reviews/pr-1.md" '"rereview":{"trigger":"label","label":"cg-rereview","login":null,"delta_label":"cg-delta"}' 'review-meta names the delta label for the fix round'
 ls -d "$SANDBOX"/tmp/review-pr-1* >/dev/null 2>&1 && { printf 'FAIL %s: leftovers after post\n' "$CASE"; FAILED=1; } || printf 'ok   %s: clone, copies, diff, ctx removed\n' "$CASE"
+
+# --- post: a token of another login removes the served review request -----------
+req_fx() { # the live PR requests a review from bot_login
+  local f; f="$GH_FIXTURES/$(fx_for 'api repos/acme/widgets/pulls/1')"
+  jq '.requested_reviewers = [{login:"test-bot"}]' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+}
+setup post_request_app_token '- rereview_trigger: both'
+seed_identity 'acme-app[bot]'
+pr_fx open; req_fx
+run_rp prepare 1
+printf '### Summary\nx\n### Verdict\nCOMMENT\n' > "$SANDBOX/body.md"
+printf '[]' > "$SANDBOX/findings.json"
+printf '{"id":84,"html_url":"https://example.test/r/84","state":"COMMENTED"}' | fx "$(POST_SLUG)"
+run_rp post 1 --verdict COMMENT --body "$SANDBOX/body.md" --findings "$SANDBOX/findings.json"
+assert_jq '.outcome == "posted"' 'the App token posts the review'
+grep -qF -- '-X DELETE repos/acme/widgets/pulls/1/requested_reviewers -f reviewers[]=test-bot' "$SANDBOX/gh.log" \
+  && printf 'ok   %s: the review request of bot_login is removed\n' "$CASE" \
+  || { printf 'FAIL %s: no request removal in %s\n' "$CASE" "$(tr '\n' ';' < "$SANDBOX/gh.log")"; FAILED=1; }
+# the token is bot_login: GitHub clears the request when the review posts
+setup post_request_user_token '- rereview_trigger: both'
+seed_identity test-bot
+pr_fx open; req_fx
+run_rp prepare 1
+printf '### Summary\nx\n### Verdict\nCOMMENT\n' > "$SANDBOX/body.md"
+printf '[]' > "$SANDBOX/findings.json"
+printf '{"id":85,"html_url":"https://example.test/r/85","state":"COMMENTED"}' | fx "$(POST_SLUG)"
+run_rp post 1 --verdict COMMENT --body "$SANDBOX/body.md" --findings "$SANDBOX/findings.json"
+assert_jq '.outcome == "posted"' 'the user token posts the review'
+grep -q 'requested_reviewers' "$SANDBOX/gh.log" \
+  && { printf 'FAIL %s: bot_login removed a request its own review clears\n' "$CASE"; FAILED=1; } \
+  || printf 'ok   %s: no request removal when the token is bot_login\n' "$CASE"
 
 # --- post: triage passes through, and human_review_paths forces needs-human -------
 # docs/review-mechanics.md → Summary body format (`triage`)
@@ -843,11 +941,97 @@ printf '[{"status":"new","severity":"critical","file":"src/alpha.ts","line":6,"i
 jq -nc '[{path:"src/alpha.ts",line:6,side:"RIGHT",body:"🔴 **Critical:** q\n**Fix:** f"}]' > "$SANDBOX/comments.json"
 printf '{"id":78,"html_url":"https://example.test/r/78","state":"CHANGES_REQUESTED"}' | fx "$(POST_SLUG)"
 fx_fail_once "$(POST_SLUG)" 1
-fx_err "$(POST_SLUG)" '{"message":"Unprocessable Entity","errors":[{"resource":"PullRequestReviewComment","field":"line","code":"invalid","message":"line must be part of the diff"}]}'
+fx_err "$(POST_SLUG)" 'gh: Unprocessable Entity (HTTP 422)'
+fx_out "$(POST_SLUG)" '{"message":"Unprocessable Entity","errors":[{"resource":"PullRequestReviewComment","field":"line","code":"invalid","message":"line must be part of the diff"}]}'
 run_rp post 1 --verdict REQUEST_CHANGES --body "$SANDBOX/body.md" --findings "$SANDBOX/findings.json" --comments "$SANDBOX/comments.json"
 assert_jq '.outcome == "posted" and .review_id == 78' 'second POST succeeds'
 assert_jq '.moved_to_summary | length == 1 and .[0].reason == "422 line not in diff"' 'inline comments moved after the 422'
 [ "$(grep -c 'reviews -X POST' "$SANDBOX/gh.log")" -eq 2 ] && printf 'ok   %s: exactly one retry\n' "$CASE" || { printf 'FAIL %s: POST count %s\n' "$CASE" "$(grep -c 'reviews -X POST' "$SANDBOX/gh.log")"; FAILED=1; }
+
+# --- progress channel: a GitHub App token writes a check run ------------------
+setup progress_check_run '- review_progress: enabled'
+seed_identity 'acme-app[bot]'
+pr_fx open '["cg-rereview"]'
+run_rp prepare 1
+assert_call 'POST repos/acme/widgets/check-runs' 'an App token writes a check run'
+grep -q "statuses/$B1_SHA" "$SANDBOX/gh.log" \
+  && { printf 'FAIL %s: a commit status was written beside the check run\n' "$CASE"; FAILED=1; } \
+  || printf 'ok   %s: no commit status\n' "$CASE"
+jq -e -s --arg s "$B1_SHA" 'any(.[]; .name == "cg:review" and .head_sha == $s and .status == "in_progress")' \
+  "$SANDBOX/gh.log.input" >/dev/null \
+  && printf 'ok   %s: the run is named review_marker and in progress\n' "$CASE" \
+  || { printf 'FAIL %s: check run body %s\n' "$CASE" "$(cat "$SANDBOX/gh.log.input" 2>/dev/null)"; FAILED=1; }
+run_rp abort 1 "reset"
+
+# --- a refused check run falls back to a commit status --------------------------
+setup progress_fallback '- review_progress: enabled'
+seed_identity 'acme-app[bot]'
+fx_fail 'api -X POST repos/acme/widgets/check-runs --input -' 1
+run_rp progress 1 "$B1_SHA" success "review abandoned - resumes when the PR is ready"
+assert_jq '.outcome == "written"' 'the fallback write succeeds'
+assert_call "statuses/$B1_SHA -f state=success" 'the status channel took over'
+
+# --- a user token writes a commit status; an open run is updated, not doubled ---
+setup progress_user_status '- review_progress: enabled'
+seed_identity test-bot
+run_rp progress 1 "$B1_SHA" success "review abandoned - resumes when the PR is ready"
+assert_jq '.outcome == "written"' 'the status reset row is written'
+assert_call "statuses/$B1_SHA -f state=success" 'a user token writes a commit status'
+setup progress_patch_open_run '- review_progress: enabled' '- rereview_delta_label: cg-delta'
+seed_identity 'acme-app[bot]'
+printf '{"check_runs":[{"id":55,"status":"in_progress","app":{"slug":"acme-app"},"output":{"summary":"- `10:00Z` queued"}}]}' \
+  | fx "api repos/acme/widgets/commits/$B1_SHA/check-runs?check_name=cg%3Areview&filter=latest"
+run_rp progress 1 "$B1_SHA" success "done" "https://example.test/r/9"
+assert_call 'PATCH repos/acme/widgets/check-runs/55' 'the open run is completed in place'
+jq -e -s 'any(.[]; (.output.summary | startswith("- `10:00Z` queued\n- `") and endswith("Z` done — [open](https://example.test/r/9)"))
+               and .conclusion == "success" and (.completed_at | length) > 0)' "$SANDBOX/gh.log.input" >/dev/null \
+  && printf 'ok   %s: the summary keeps the timeline and links the review\n' "$CASE" \
+  || { printf 'FAIL %s: check run body %s\n' "$CASE" "$(cat "$SANDBOX/gh.log.input" 2>/dev/null)"; FAILED=1; }
+jq -e -s 'any(.[]; (.output.text | contains("`cg-rereview` to get a full review") and contains("`cg-delta` to get a review of the changes")
+                and contains("`@test-bot please re-review`")))' "$SANDBOX/gh.log.input" >/dev/null \
+  && printf 'ok   %s: the text says how to request the next round\n' "$CASE" \
+  || { printf 'FAIL %s: check run text %s\n' "$CASE" "$(cat "$SANDBOX/gh.log.input" 2>/dev/null)"; FAILED=1; }
+setup progress_other_app_run '- review_progress: enabled'
+seed_identity 'acme-app[bot]'
+printf '{"check_runs":[{"id":56,"status":"in_progress","app":{"slug":"other-app"}}]}' \
+  | fx "api repos/acme/widgets/commits/$B1_SHA/check-runs?check_name=cg%3Areview&filter=latest"
+run_rp progress 1 "$B1_SHA" pending "queued"
+assert_call 'POST repos/acme/widgets/check-runs' 'a run of another App is left alone and a new run is created'
+grep -q 'check-runs/56' "$SANDBOX/gh.log" \
+  && { printf 'FAIL %s: the other App'"'"'s run was patched\n' "$CASE"; FAILED=1; } \
+  || printf 'ok   %s: the other App'"'"'s run is not patched\n' "$CASE"
+jq -e -s 'any(.[]; .status == "in_progress" and (.started_at | length) > 0 and (.output.text | contains("@acme-app please re-review") | not))' "$SANDBOX/gh.log.input" >/dev/null \
+  && printf 'ok   %s: a new run starts now\n' "$CASE" \
+  || { printf 'FAIL %s: check run body %s\n' "$CASE" "$(cat "$SANDBOX/gh.log.input" 2>/dev/null)"; FAILED=1; }
+
+# --- an unreadable token login adopts no run: it creates its own ---------------
+setup progress_unknown_identity '- review_progress: enabled'
+printf '{"check_runs":[{"id":57,"status":"in_progress","app":{"slug":"acme-app"}}]}' \
+  | fx "api repos/acme/widgets/commits/$B1_SHA/check-runs?check_name=cg%3Areview&filter=latest"
+fx_fail "api -X POST repos/acme/widgets/statuses/$B1_SHA -f state=success -f context=cg:review -f description=done" 1
+run_rp progress 1 "$B1_SHA" success "done"
+assert_call 'POST repos/acme/widgets/check-runs' 'the refused status falls back to a run of its own'
+grep -q 'check-runs/57' "$SANDBOX/gh.log" \
+  && { printf 'FAIL %s: an open run was patched without a known login\n' "$CASE"; FAILED=1; } \
+  || printf 'ok   %s: no open run is adopted without a known login\n' "$CASE"
+# the created run names its App: the next update completes that run, not a third one
+setup progress_learns_identity '- review_progress: enabled'
+fx_fail "api -X POST repos/acme/widgets/statuses/$B1_SHA -f state=pending -f context=cg:review -f description=queued" 1
+fx_fail "api -X POST repos/acme/widgets/statuses/$B1_SHA -f state=success -f context=cg:review -f description=done" 1
+printf '{"id":58,"status":"in_progress","app":{"slug":"acme-app"}}' | fx 'api -X POST repos/acme/widgets/check-runs --input -'
+run_rp progress 1 "$B1_SHA" pending "queued"
+jq -e '.login == "acme-app[bot]" and .kind == "app"' "$WORK/GITHUB.json" >/dev/null 2>&1 \
+  && printf 'ok   %s: the created run names the token login\n' "$CASE" \
+  || { printf 'FAIL %s: GITHUB.json %s\n' "$CASE" "$(cat "$WORK/GITHUB.json" 2>/dev/null)"; FAILED=1; }
+printf '{"check_runs":[{"id":58,"status":"in_progress","app":{"slug":"acme-app"}}]}' \
+  | fx "api repos/acme/widgets/commits/$B1_SHA/check-runs?check_name=cg%3Areview&filter=latest"
+run_rp progress 1 "$B1_SHA" success "done"
+assert_call 'PATCH repos/acme/widgets/check-runs/58' 'the next update completes the run it created'
+
+# --- review_progress off: the subcommand writes nothing -------------------------
+setup progress_disabled
+run_rp progress 1 "$B1_SHA" success "x"
+assert_jq '.outcome == "disabled"' 'nothing written without review_progress'
 
 # --- post: closed at post time — discard without criticals, issue path with ------
 setup post_closed
@@ -868,6 +1052,18 @@ run_rp post 1 --verdict REQUEST_CHANGES --body "$SANDBOX/body.md" --findings "$S
 assert_jq '.outcome == "closed_filed" and .issue == 9' 'finalized against the issue'
 assert_file_contains "$WORK/REVIEWS.md" "| 1 | $B1_SHA | .* | REQUEST_CHANGES | done |" 'done row after the issue'
 assert_file_contains "$WORK/reviews/pr-1.md" '_Delivered as issue #9 — PR closed before posting._' 'history note'
+
+# --- post: closed, the issue an alias filed earlier is found -------------------
+setup post_closed_alias
+seed_identity 'acme-app[bot]'
+run_rp prepare 1
+pr_fx closed
+printf '### Summary\nx\n' > "$SANDBOX/body.md"
+printf '[{"status":"new","severity":"critical","file":"src/alpha.ts","line":6,"inline":false,"summary":"c","fix":"f"}]' > "$SANDBOX/findings.json"
+jq -nc --arg m "<!-- cg:review:issue headRefOid=$B1_SHA -->" '[{number:12, body:("x\n" + $m)}]' \
+  | fx 'api --paginate repos/acme/widgets/issues?state=all&per_page=100&creator=acme-app%5Bbot%5D'
+run_rp post 1 --verdict REQUEST_CHANGES --body "$SANDBOX/body.md" --findings "$SANDBOX/findings.json"
+assert_jq '.outcome == "closed_findings" and .existing_issue == 12' 'an issue the alias created dedups the next one'
 
 # --- rapid: urgent phase 1 -------------------------------------------------------
 setup rapid_case '- urgent_label: urgent'
@@ -892,6 +1088,29 @@ assert_event 'rapid posted' 'rapid event'
 printf '[{"id":70,"state":"CHANGES_REQUESTED","user":{"login":"test-bot"},"body":"r <!-- cg:review:rapid headRefOid=%s -->"}]' "$B1_SHA" | fx 'api repos/acme/widgets/pulls/1/reviews?per_page=100'
 run_rp rapid 1 --verdict REQUEST_CHANGES --body "$SANDBOX/rapid.md"
 assert_jq '.outcome == "already_posted"' 'rapid dedup by its own marker'
+run_rp abort 1 "reset"
+
+# --- rapid on a pull request this account opened: a COMMENT ----------------------
+setup rapid_own_pr '- urgent_label: urgent'
+seed_identity 'acme-app[bot]'
+pr_fx open '["urgent"]'; own_pr_fx
+run_rp prepare 1
+printf '### Critical findings\nNone.\n' > "$SANDBOX/rapid.md"
+printf '{"id":71,"html_url":"https://example.test/r/71","state":"COMMENTED"}' | fx "$(POST_SLUG)"
+run_rp rapid 1 --verdict APPROVE --body "$SANDBOX/rapid.md"
+assert_jq '.outcome == "posted" and .verdict == "APPROVE" and .event == "COMMENT"' 'a rapid approval of the own PR is a comment'
+jq -se 'last | .event == "COMMENT" and (.body | startswith("> **Verdict: APPROVE.**"))' "$SANDBOX/gh.log.input" >/dev/null \
+  && printf 'ok   %s: the rapid body names the verdict\n' "$CASE" || { printf 'FAIL %s: rapid payload %s\n' "$CASE" "$(tail -1 "$SANDBOX/gh.log.input")"; FAILED=1; }
+run_rp abort 1 "reset"
+# without an identity cache, the refusal in the error body turns the retry into a COMMENT
+setup rapid_own_pr_422 '- urgent_label: urgent'
+pr_fx open '["urgent"]'; own_pr_fx
+run_rp prepare 1
+printf '### Critical findings\nNone.\n' > "$SANDBOX/rapid.md"
+printf '{"id":73,"html_url":"https://example.test/r/73","state":"COMMENTED"}' | fx "$(POST_SLUG)"
+own_pr_422_fx
+run_rp rapid 1 --verdict APPROVE --body "$SANDBOX/rapid.md"
+assert_jq '.outcome == "posted" and .verdict == "APPROVE" and .event == "COMMENT"' 'the refused rapid approval is retried as a comment'
 run_rp abort 1 "reset"
 
 # --- rapid approval, then a full review below APPROVE revokes it -------------------
@@ -1029,6 +1248,22 @@ printf '{"id":79,"html_url":"https://example.test/r/79","state":"COMMENTED"}' | 
 run_rp post 1 --verdict COMMENT --body "$SANDBOX/body.md" --findings "$SANDBOX/findings.json"
 assert_jq '.outcome == "posted" and .dismissed_approval == 5' 'stale approval dismissed'
 assert_call 'reviews/5/dismissals -X PUT' 'dismissal call issued'
+
+# --- a GitHub App bot_login that another agent shares: only the marked approval goes
+setup post_dismiss_shared_app
+sed -i.bak 's/^- bot_login: test-bot$/- bot_login: acme-app[bot]/' "$WORK/CONFIG.md"
+printf '# PR #1: alpha PR\n\n## Review at aaaaaaa — %s — APPROVE\n\nx\n' "$(iso_ago 7200)" > "$WORK/reviews/pr-1.md"
+add_row 1 "0000000000000000000000000000000000000000" "$(iso_ago 7200)" APPROVE awaiting_label
+pr_fx open '["cg-rereview"]'
+run_rp prepare 1
+printf '[{"id":5,"state":"APPROVED","user":{"login":"acme-app[bot]"},"body":"ok <!-- cg:review headRefOid=0000000000000000000000000000000000000000 -->"},{"id":6,"state":"APPROVED","user":{"login":"acme-app[bot]"},"body":"ok <!-- other:review headRefOid=0000000000000000000000000000000000000000 -->"}]' | fx 'api repos/acme/widgets/pulls/1/reviews?per_page=100'
+printf '### Summary\nx\n' > "$SANDBOX/body.md"; printf '[]' > "$SANDBOX/findings.json"
+printf '{"id":79,"html_url":"https://example.test/r/79","state":"COMMENTED"}' | fx "$(POST_SLUG)"
+run_rp post 1 --verdict COMMENT --body "$SANDBOX/body.md" --findings "$SANDBOX/findings.json"
+assert_jq '.outcome == "posted" and .dismissed_approval == 5' 'the approval with this marker is dismissed'
+grep -q 'reviews/6/dismissals' "$SANDBOX/gh.log" \
+  && { printf 'FAIL %s: the approval of another agent on the same App login was dismissed\n' "$CASE"; FAILED=1; } \
+  || printf 'ok   %s: the approval of another agent on the same App login stays\n' "$CASE"
 
 # --- carried first review: a HEAD move keeps the work, not the narrative ---------
 setup carry_write

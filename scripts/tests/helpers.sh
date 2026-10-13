@@ -50,6 +50,13 @@ base_config() { # [extra lines…]
   } > "$WORK/CONFIG.md"
 }
 
+# the token's cached identity (docs/github-access.md), fresh so no run re-reads it
+seed_identity() { # <login> [previous-login]
+  jq -n --arg l "$1" --arg p "${2:-}" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{login:$l, kind:(if ($l|endswith("[bot]")) then "app" else "user" end), checked_at:$t}
+     + (if $p == "" then {} else {previous:{login:$p, kind:"user"}, changed_at:$t} end)' > "$WORK/GITHUB.json"
+}
+
 # a mention of the bot on PR #1 puts the PR into this run's mentions_due
 mention_on_pr1() {
   local s=$(( $(date -u +%s) - 7*86400 )) ms
@@ -89,8 +96,10 @@ fx_body_edited() { # <number> <iso-ts|->
 fx_fail()      { printf '%s' "${2:-1}" > "$GH_FIXTURES/$(fx_for "$1").rc"; }
 # same, but only the next call fails; later calls serve the body fixture
 fx_fail_once() { printf 'once:%s' "${2:-1}" > "$GH_FIXTURES/$(fx_for "$1").rc"; }
-# the stderr body a failing call prints (pair with fx_fail / fx_fail_once)
+# the stderr text a failing call prints (pair with fx_fail / fx_fail_once)
 fx_err() { printf '%s' "$2" > "$GH_FIXTURES/$(fx_for "$1").err"; }
+# the error body a failing call prints on stdout, as real gh does
+fx_out() { printf '%s' "$2" > "$GH_FIXTURES/$(fx_for "$1").out"; }
 
 # ISO-8601 UTC timestamp <n> seconds in the past (GNU + BSD date)
 iso_ago() {

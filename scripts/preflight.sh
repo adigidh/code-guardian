@@ -379,11 +379,32 @@ TARGET_REF="$(cfg github_repo)"
 REPO_HOST="$(refhost "$TARGET_REF")"; REPO="$(refslug "$TARGET_REF")"
 export GH_HOST="$REPO_HOST"   # every unqualified gh call targets the review host
 BOT_LOGIN="$(cfg bot_login)"
+# the token's own login, re-read hourly (forced by the audit); docs/github-access.md
+identity_refresh "$([ "$MODE" = audit ] && echo force)" || true
+SELF_TRUSTED="$(self_trusted_login)"; SELF_MARKED="$(self_marked_logins)"
 WORK_REPO="$(cfg work_repo)"   # empty = local-only persistence (docs/persistence.md)
 REVIEW_MARKER="$(cfg review_marker)"
+CI_OWN_CHECK="$REVIEW_MARKER"   # lib/ci-rollup.sh skips the own progress signal
+# whether review <id> on PR <n> carries the review marker: 0 yes, 1 no, 2
+# unreadable (not cached, so a later call retries) — one GET per review
+OWN_REVIEWS="|"; OTHER_REVIEWS="|"
+own_review() { # <pr-number> <review-id>
+  local r
+  [ -n "$2" ] && [ -n "$REVIEW_MARKER" ] || return 1
+  case "$OWN_REVIEWS" in (*"|$2|"*) return 0;; esac
+  case "$OTHER_REVIEWS" in (*"|$2|"*) return 1;; esac
+  r="$(gh api "repos/$REPO/pulls/$1/reviews/$2" 2>/dev/null)" || return 2
+  printf '%s' "$r" | jq -e 'type == "object" and has("id")' >/dev/null 2>&1 || return 2
+  if printf '%s' "$r" | jq -e --arg m "<!-- $REVIEW_MARKER" '(.body // "") | contains($m)' >/dev/null 2>&1; then
+    OWN_REVIEWS="$OWN_REVIEWS$2|"; return 0
+  fi
+  OTHER_REVIEWS="$OTHER_REVIEWS$2|"; return 1
+}
 REREVIEW_LABEL="$(cfg rereview_label)"; REREVIEW_LABEL="${REREVIEW_LABEL:-code-guardian-review}"
+REREVIEW_DELTA_LABEL="$(cfg rereview_delta_label)"   # empty/missing = no delta label
 URGENT_LABEL="$(cfg urgent_label)"   # empty/missing = urgent handling off
 ARTIFACT="$(cfg artifact_skill)"
+ARTIFACT_LABEL="$(cfg artifact_label)"   # empty/missing = the assignee gate alone
 ARTIFACT_SKILL="${ARTIFACT%%@*}"; ARTIFACT_SRC="${ARTIFACT##*@}"
 { [ "$ARTIFACT" = "none" ] || [ -z "$ARTIFACT" ]; } && ARTIFACT_SKILL=""
 ARTIFACT_RETRY_H=24   # generate backoff after a dam-unavailable skip (docs/artifact.md)
@@ -431,7 +452,7 @@ MENTION_PAGES=3                       # comment pages the mention scan follows (
 # HOLDER_QUIET_MIN and FANOUT_QUIET_MIN, the live-holder windows: lib/holds.sh
 # branch of $DEFINITION_REPO this instance tracks (default main)
 DEFINITION_BRANCH="$(cfg definition_branch)"; DEFINITION_BRANCH="${DEFINITION_BRANCH:-main}"
-# GitHub progress signal — commit status on the reviewed SHA (docs/review.md)
+# GitHub progress signal — a check run or commit status on the reviewed SHA (docs/review.md)
 PROGRESS="$(cfg review_progress)"; PROGRESS="${PROGRESS:-disabled}"
 case "$PROGRESS" in
   (enabled|disabled) ;;
@@ -471,8 +492,8 @@ WATCH_RULES="$(cfg_table 'Watch rules' | while IFS='|' read -r _ id wf notify no
   done | jq -s .)"; [ -n "$WATCH_RULES" ] || WATCH_RULES='[]'
 report_surface audit_trend AUDIT_TREND
 CONFIG_JSON="$(jq -nc --arg repo "$REPO" --arg host "$REPO_HOST" --arg bot "$BOT_LOGIN" --arg name "$BOT_NAME" \
-  --arg marker "$REVIEW_MARKER" --arg lbl "$REREVIEW_LABEL" --arg trig "$(cfg rereview_trigger)" --arg urg "$URGENT_LABEL" \
-  --arg prog "$PROGRESS" --arg ci "$CI_TRIAGE" --arg rd "$(cfg review_dispatch)" --arg rmod "$(cfg review_model)" --arg mr "$(cfg mention_replies)" --arg ma "$(cfg mention_authors)" --arg art "${ARTIFACT_SKILL:+$ARTIFACT}" \
+  --arg marker "$REVIEW_MARKER" --arg lbl "$REREVIEW_LABEL" --arg dlbl "$REREVIEW_DELTA_LABEL" --arg trig "$(cfg rereview_trigger)" --arg urg "$URGENT_LABEL" \
+  --arg prog "$PROGRESS" --arg ci "$CI_TRIAGE" --arg rd "$(cfg review_dispatch)" --arg rmod "$(cfg review_model)" --arg mr "$(cfg mention_replies)" --arg ma "$(cfg mention_authors)" --arg art "${ARTIFACT_SKILL:+$ARTIFACT}" --arg artl "$ARTIFACT_LABEL" \
   --arg slack "$SLACK" --arg audit "$(cfg audit_report)" --arg atr "$AUDIT_TREND" --arg dis "$(cfg definition_issues)" \
   --arg eo "$ESCALATION_OWNER" --argjson stall "$STALL_ALERT_THRESHOLD" --argjson raf "$ANOMALY_FACTOR" \
   --argjson mat "$MODEL_ALERT_THRESHOLD" --argjson gat "$GITHUB_ALERT_THRESHOLD" --argjson cat "$CLASSIFIER_ALERT_THRESHOLD" \
@@ -483,18 +504,20 @@ CONFIG_JSON="$(jq -nc --arg repo "$REPO" --arg host "$REPO_HOST" --arg bot "$BOT
   --arg af "$(cfg agent_fixes)" --arg afl "$(cfg agent_fix_label)" \
   --arg bench "$(cfg benchmark)" --arg bj "$(cfg benchmark_judge)" --arg br "$(cfg benchmark_report)" \
   --arg mrn "$(cfg merge_ready_nudge)" --arg sv "$(cfg survey)" --arg sr "$(cfg survey_report)" --arg srf "$(cfg survey_report_findings)" --arg sid "$(cfg survey_interval_days)" \
-  --argjson skills "$SKILLS_TABLE" --argjson watches "$WATCH_RULES" \
+  --arg tl "$(token_login)" --argjson skills "$SKILLS_TABLE" --argjson watches "$WATCH_RULES" \
   --arg ah "$(cfg active_hours)" --arg ad "$(cfg active_days)" --arg ria "$(cfg review_interval_active)" --argjson riq "$REVIEW_INTERVAL_QUIET" '
-  {github_repo:$repo, repo_host:$host, bot_login:(if $bot=="" then null else $bot end), bot_display_name:$name,
+  {github_repo:$repo, repo_host:$host, bot_login:(if $bot=="" then null else $bot end),
+   github_identity:(if $tl=="" then null else {login:$tl, kind:(if ($tl|endswith("[bot]")) then "app" else "user" end)} end), bot_display_name:$name,
    active_hours:(if $ah=="" then "00-23" else $ah end), active_days:(if $ad=="" then "Mon-Sun" else $ad end),
    review_interval_active:(if ($ria|test("^[0-9]+$")) then ($ria|tonumber) else 5 end), review_interval_quiet:$riq,
    review_marker:(if $marker=="" then null else $marker end), rereview_label:$lbl,
+   rereview_delta_label:(if $dlbl=="" then null else $dlbl end),
    rereview_trigger:(if $trig=="" then "label" else $trig end), urgent_label:(if $urg=="" then null else $urg end),
    review_progress:$prog, ci_triage:$ci, review_dispatch:(if $rd=="disabled" then "disabled" else "enabled" end),
    review_model:(if $rmod=="" or ($rmod|ascii_downcase)=="default" then "default" else $rmod end),
    mention_replies:(if $mr=="" then "enabled" else $mr end),
    mention_authors:(if $ma=="anyone" then "anyone" else "collaborators" end),
-   artifact_skill:(if $art=="" then "none" else $art end),
+   artifact_skill:(if $art=="" then "none" else $art end), artifact_label:(if $artl=="" then null else $artl end),
    slack_notifications:(if $slack=="" then "disabled" else $slack end), audit_report:(if $audit=="" then "enabled" else $audit end),
    audit_trend:$atr, definition_issues:(if $dis=="enabled" then "enabled" else "disabled" end),
    escalation_owner:(if $eo=="" then null else $eo end), stall_alert_threshold:$stall, review_anomaly_factor:$raf,
@@ -884,10 +907,15 @@ if [ "$MODE" = "review" ]; then
   if [ "$TRIG_REQUEST" -eq 1 ] && [ -z "$BOT_LOGIN" ]; then
     TRIG_REQUEST=0; TRIG_LABEL=1
     log "bot_login missing — review-request trigger disabled this run (label-only)"
+  elif [ "$TRIG_REQUEST" -eq 1 ] && [ "$(login_kind "$BOT_LOGIN")" = app ]; then
+    # GitHub cannot request a review from a GitHub App (docs/github-access.md)
+    TRIG_REQUEST=0; TRIG_LABEL=1
+    log "bot_login $BOT_LOGIN is a GitHub App — review-request trigger disabled (label-only)"
   fi
   TRIG_DESC="$REREVIEW_LABEL"
   [ "$TRIG_REQUEST" -eq 1 ] && TRIG_DESC="review request"
   [ "$TRIG_LABEL" -eq 1 ] && [ "$TRIG_REQUEST" -eq 1 ] && TRIG_DESC="$REREVIEW_LABEL or review request"
+  [ -n "$REREVIEW_DELTA_LABEL" ] && TRIG_DESC="$TRIG_DESC or $REREVIEW_DELTA_LABEL"
 
   add_review() { # number sha ref title author kind takeover prior_json urgent closed full desc
     # full: complete-review scope — always true for kind=first; on a re-review
@@ -968,7 +996,9 @@ if [ "$MODE" = "review" ]; then
   while IFS=$'\t' read -r n sha ref title author labels assignees requested url; do
     has_label=0; [ "$TRIG_LABEL" -eq 1 ] && printf '%s' "$labels" | tr ',' '\n' | grep -qxF "$REREVIEW_LABEL" && has_label=1
     has_request=0; [ "$TRIG_REQUEST" -eq 1 ] && printf '%s' "$requested" | tr ',' '\n' | grep -qxF "$BOT_LOGIN" && has_request=1
-    triggered=0; { [ "$has_label" -eq 1 ] || [ "$has_request" -eq 1 ]; } && triggered=1
+    # the delta label asks what a review request asks: the changes since the last review
+    has_delta=0; [ -n "$REREVIEW_DELTA_LABEL" ] && printf '%s' "$labels" | tr ',' '\n' | grep -qxF "$REREVIEW_DELTA_LABEL" && has_delta=1
+    triggered=0; { [ "$has_label" -eq 1 ] || [ "$has_request" -eq 1 ] || [ "$has_delta" -eq 1 ]; } && triggered=1
     URG=false; [ -n "$URGENT_LABEL" ] && printf '%s' "$labels" | tr ',' '\n' | grep -qxF "$URGENT_LABEL" && URG=true
 
     # one-time urgent Slack alert (agent sends; marker in the history file is
@@ -1011,6 +1041,7 @@ if [ "$MODE" = "review" ]; then
           trig=""
           [ "$has_label" -eq 1 ] && trig="$REREVIEW_LABEL"
           [ "$has_request" -eq 1 ] && trig="${trig:+$trig + }review request"
+          [ "$has_delta" -eq 1 ] && trig="${trig:+$trig + }$REREVIEW_DELTA_LABEL"
           body_edited="$(gh api graphql -F n="$n" -f o="${REPO%%/*}" -f r="${REPO#*/}" -f query='
               query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){
                 pullRequest(number:$n){lastEditedAt}}}' 2>/dev/null \
@@ -1023,7 +1054,8 @@ if [ "$MODE" = "review" ]; then
             CLEANUPS_DUE="$(printf '%s' "$CLEANUPS_DUE" | jq --argjson e "$(jq -n --argjson n "$n" \
               --argjson l "$([ "$has_label" -eq 1 ] && echo true || echo false)" \
               --argjson r "$([ "$has_request" -eq 1 ] && echo true || echo false)" \
-              '{number:$n, label:$l, request:$r}')" '. + [$e]')"
+              --argjson d "$([ "$has_delta" -eq 1 ] && echo true || echo false)" \
+              '{number:$n, label:$l, request:$r, delta_label:$d}')" '. + [$e]')"
             log "PR #$n: $trig present but nothing new since ${row_sha:0:7} (no commits, no description edit) — trigger cleanup due"
           fi
         fi
@@ -1089,10 +1121,15 @@ if [ "$MODE" = "review" ]; then
       fi
     fi
 
-    # artifact assignee gate (independent of the review decision)
-    if [ -n "$ARTIFACT_SKILL" ] && [ -n "$BOT_LOGIN" ] && printf '%s' "$assignees" | tr ',' '\n' | grep -qxF "$BOT_LOGIN"; then
+    # artifact gate (independent of the review decision): $BOT_LOGIN assigned,
+    # or the artifact label on the PR — a GitHub App cannot be assigned
+    art_trig='[]'
+    [ -n "$BOT_LOGIN" ] && printf '%s' "$assignees" | tr ',' '\n' | grep -qxF "$BOT_LOGIN" && art_trig='["assignee"]'
+    [ -n "$ARTIFACT_LABEL" ] && printf '%s' "$labels" | tr ',' '\n' | grep -qxF "$ARTIFACT_LABEL" \
+      && art_trig="$(printf '%s' "$art_trig" | jq -c '. + ["label"]')"
+    if [ -n "$ARTIFACT_SKILL" ] && [ "$art_trig" != '[]' ]; then
       action="generate"
-      if grep -q '<!-- artifact-dam:' "$WORK/reviews/pr-$n.md" 2>/dev/null; then action="retry_unassign"
+      if grep -q '<!-- artifact-dam:' "$WORK/reviews/pr-$n.md" 2>/dev/null; then action="retry_release"
       else
         # a session without the DAM tools recorded when it tried (docs/artifact.md
         # step 0): the next attempt waits ARTIFACT_RETRY_H, not one heartbeat
@@ -1100,8 +1137,8 @@ if [ "$MODE" = "review" ]; then
         [ -n "$skip_ts" ] && [ $(( NOW_EPOCH - $(iso2epoch "$skip_ts") )) -lt $(( ARTIFACT_RETRY_H * 3600 )) ] && action=""
       fi
       if [ -n "$action" ]; then
-        ARTIFACTS_DUE="$(printf '%s' "$ARTIFACTS_DUE" | jq --argjson e "$(jq -n --argjson n "$n" --arg a "$action" \
-          '{number:$n, action:$a}')" '. + [$e]')"
+        ARTIFACTS_DUE="$(printf '%s' "$ARTIFACTS_DUE" | jq --argjson e "$(jq -n --argjson n "$n" --arg a "$action" --argjson t "$art_trig" \
+          '{number:$n, action:$a, triggers:$t}')" '. + [$e]')"
         log "PR #$n: artifact $action due"
       fi
     fi
@@ -1331,7 +1368,7 @@ if [ "$MODE" = "review" ]; then
       && log "mention scan: issue comments still full after $MENTION_PAGES pages — scanned the newest $((MENTION_PAGES * 100)), back to $(scan_floor "$IC_TMP"); older comments in the window are not scanned"
     [ "${RC_N:-0}" -ge "$((MENTION_PAGES * 100))" ] \
       && log "mention scan: review comments still full after $MENTION_PAGES pages — scanned the newest $((MENTION_PAGES * 100)), back to $(scan_floor "$RC_TMP"); older comments in the window are not scanned"
-    MRE="@${BOT_LOGIN}([^A-Za-z0-9-]|\$)"
+    MRE="$(mention_re "$BOT_LOGIN")"   # an App bot_login also as @<slug>
     CAND_TMP="$(mktemp "${TMPDIR:-/tmp}/cg-mentions-cand.XXXXXX")"
     jq -nc --slurpfile ic "$IC_TMP" --slurpfile rc "$RC_TMP" --arg re "$MRE" --arg bot "$BOT_LOGIN" --arg ma "$MENTION_AUTHORS" '
       def admitted: ($ma == "anyone") or ((.author_association // "") | IN("OWNER", "MEMBER", "COLLABORATOR"));
@@ -1399,9 +1436,17 @@ if [ "$MODE" = "review" ]; then
       # the bot's inline comment (root in the same batch, else one GET)
       if [ "$(printf '%s' "$c" | jq -r '.thread + " " + (.mentioned|tostring)')" = "inline false" ]; then
         root="$(printf '%s' "$c" | jq -r '.in_reply_to')"
-        root_author="$(jq -r --argjson r "$root" 'select(.id == $r) | .user.login' "$RC_TMP" 2>/dev/null | head -1)"
-        [ -z "$root_author" ] && root_author="$(gh api "repos/$REPO/pulls/comments/$root" 2>/dev/null | jq -r '.user.login // empty')"
-        [ "$root_author" = "$BOT_LOGIN" ] || continue
+        root_json="$(jq -c --argjson r "$root" 'select(.id == $r)' "$RC_TMP" 2>/dev/null | head -1)"
+        [ -z "$root_json" ] && root_json="$(gh api "repos/$REPO/pulls/comments/$root" 2>/dev/null)"
+        root_author="$(printf '%s' "$root_json" | jq -r '.user.login // empty' 2>/dev/null)"
+        if [ -z "$SELF_TRUSTED" ] || [ "$root_author" != "$SELF_TRUSTED" ]; then
+          # a bot root (bot_login or the token's login) is the agent's only when
+          # its review carries the marker — one GitHub App can post for others
+          printf '%s' "$SELF_MARKED" | jq -e --arg a "$root_author" 'index($a) != null' >/dev/null 2>&1 || continue
+          own_review "$(printf '%s' "$c" | jq -r '.number')" \
+            "$(printf '%s' "$root_json" | jq -r '.pull_request_review_id // empty' 2>/dev/null)"
+          case $? in (0) ;; (2) log_warn "mention scan: review of thread root $root unreadable — reply $cid retried next run"; continue;; (*) continue;; esac
+        fi
       fi
       # an author outside mention_authors is counted, never emitted
       if [ "$(printf '%s' "$c" | jq -r '.admitted')" != "true" ] \
@@ -1480,9 +1525,10 @@ if [ "$MODE" = "review" ]; then
     done <<< "$files"
     # a person's open change request stands, whatever branch protection requires;
     # every page, oldest first, so a person's latest review is never cut off
-    case "$(gh_get --paginate "repos/$REPO/pulls/$n/reviews?per_page=100" | jq -rs --arg b "$BOT_LOGIN" '
+    case "$(gh_get --paginate "repos/$REPO/pulls/$n/reviews?per_page=100" | jq -rs --arg b "$BOT_LOGIN" --arg m "<!-- $REVIEW_MARKER" '
         if length == 0 or any(.[]; type != "array") then "unreadable" else
-          [ add | .[] | select(.user.login != $b) | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED") ]
+          [ add | .[] | select(.user.login != $b) | select((.body // "") | contains($m) | not)
+                | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED") ]
           | group_by(.user.login) | map(last | .state)
           | if any(. == "CHANGES_REQUESTED") then "changes" else "ok" end end' 2>/dev/null)" in
       (ok) ;;
@@ -1880,12 +1926,21 @@ if [ "$MODE" = "audit" ]; then
   # --- connectivity (one line per host the pipeline uses) ---------------
   auth_detail=""; auth_status=ok; scope_detail=""; scope_status=ok
   for h in $AUDIT_HOSTS; do
-    me="$(gh api --hostname "$h" user 2>/dev/null | jq -r '.login // empty')"
+    # GraphQL `viewer`, else REST `user` (lib/common.sh → gh_login): a GitHub
+    # App installation token cannot read GET /user
+    me="$(gh_login "$h")"
     if [ -z "$me" ]; then auth_status=fail; auth_detail="${auth_detail:+$auth_detail; }$h: not authenticated (token broken or host unreachable)"
+    elif [ "$(login_kind "$me")" = app ]; then
+      # an App token posts as the App whatever bot_login names (docs/github-access.md)
+      auth_detail="${auth_detail:+$auth_detail; }$h: $me (GitHub App)"
     elif [ "$h" = "$REPO_HOST" ] && [ -n "$BOT_LOGIN" ] && [ "$me" != "$BOT_LOGIN" ]; then
       [ "$auth_status" = fail ] || auth_status=warn
       auth_detail="${auth_detail:+$auth_detail; }$h: authenticated as $me, expected $BOT_LOGIN"
     else auth_detail="${auth_detail:+$auth_detail; }$h: $me"; fi
+
+    # an App token has installation permissions, not OAuth scopes
+    case "$me" in (*"[bot]")
+      scope_detail="${scope_detail:+$scope_detail; }$h: GitHub App token (permissions, no scopes)"; continue;; esac
 
     # Token scope the pipeline depends on: `repo` for PR state and posting. A
     # missing scope fails those calls outright, so catch it here rather than per
@@ -1904,6 +1959,12 @@ if [ "$MODE" = "audit" ]; then
     else scope_detail="${scope_detail:+$scope_detail; }$h: $want"; fi
   done
   check github_auth "$auth_status" "$auth_detail"
+  # a connection change in the last 7 days asks for the access check
+  id_changed="$(jq -r '.changed_at // empty' "$WORK/GITHUB.json" 2>/dev/null)"
+  if [ -n "$id_changed" ] && [ $(( (NOW_EPOCH - $(iso2epoch "$id_changed")) / 86400 )) -lt 7 ]; then
+    check github_identity warn "the token acts as $(token_login) ($(token_kind)) since $id_changed, was $(jq -r '.previous.login + " (" + .previous.kind + ")"' "$WORK/GITHUB.json" 2>/dev/null) — operator: run scripts/github-access.sh in the direct session"
+  elif [ -n "$(token_login)" ]; then check github_identity ok "$(token_login) ($(token_kind))"
+  else check github_identity warn "the token's login is unknown — GraphQL viewer unreadable"; fi
   if [ "$scope_status" = "ok" ]; then check token_scopes ok "$scope_detail"
   else check token_scopes "$scope_status" "$scope_detail — operator-only fix; repo breaks PR state and posting"; fi
 
@@ -2822,8 +2883,22 @@ if [ "$MODE" = "audit" ]; then
     # SINGLE argument at MAX_ARG_STRLEN (128 KiB) regardless of the much larger
     # ARG_MAX, so --argjson made execve fail with "Argument list too long" and
     # the scan silently returned nothing on every busy week.
-    REACTIONS="$(printf '%s\n%s\n' "$rrc" "$ric" | jq -s --arg bot "$BOT_LOGIN" '
-      [ (.[0] + .[1])[] | select((.user.login // "") == $bot) ]
+    # a bot login's comment counts only as part of a review with the marker
+    # (one GitHub App can post for other agents): its unmarked issue comments
+    # are not attributable, and at most 30 such reviews are read
+    own_rids='[]'
+    if [ "$SELF_MARKED" != "[]" ]; then
+      while read -r rn rid; do
+        own_review "$rn" "$rid"; case $? in
+          (0) own_rids="$(printf '%s' "$own_rids" | jq -c --argjson r "$rid" '. + [$r]')";;
+          (2) rx_bad=1;;
+        esac
+      done < <(printf '%s' "$rrc" | jq -r --argjson al "$SELF_MARKED" '
+        [ .[] | select((.user.login // "") as $l | $al | index($l)) | select(.pull_request_review_id != null)
+              | "\(.pull_request_url | sub(".*/"; "")) \(.pull_request_review_id)" ] | unique | .[:30][]' 2>/dev/null)
+    fi
+    REACTIONS="$(printf '%s\n%s\n' "$rrc" "$ric" | jq -s --arg bot "$SELF_TRUSTED" --argjson own "$own_rids" '
+      [ (.[0] + .[1])[] | select(((.user.login // "") == $bot) or ((.pull_request_review_id // null) as $r | $r != null and ($own | index($r) != null))) ]
       | {up: (map(.reactions["+1"] // 0) | add // 0),
          down: (map(.reactions["-1"] // 0) | add // 0),
          down_urls: (map(select((.reactions["-1"] // 0) > 0) | .html_url) | .[0:10]),

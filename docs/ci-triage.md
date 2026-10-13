@@ -10,8 +10,9 @@ no re-run, no label, no commit, and it never changes a posted verdict.
 
 ## When it fires
 
-The same procedure, marker and comment serve both paths, so a commit is
-triaged at most once:
+The rollup skips the agent's own progress signal, the check named
+`review_marker` (`scripts/lib/ci-rollup.sh`). The same procedure, marker and
+comment serve both paths, so a commit is triaged at most once:
 
 - **At the end of a review** — after the review posts and the watch rules are
   evaluated, for the SHA that was reviewed.
