@@ -439,8 +439,8 @@ ANOMALY_MIN_SAMPLES=10     # baseline reviews of one model before the audit's re
 # heartbeat. Never stricter than the historical one-hour tolerance.
 REVIEW_INTERVAL_QUIET="$(cfg review_interval_quiet)"
 case "$REVIEW_INTERVAL_QUIET" in
-  (''|*[!0-9]*) REVIEW_INTERVAL_QUIET=60;;          # missing/unparseable -> default
-  (*) [ "$REVIEW_INTERVAL_QUIET" -ge 1 ] || REVIEW_INTERVAL_QUIET=60;;
+  (''|*[!0-9]*) REVIEW_INTERVAL_QUIET=15;;          # missing/unparseable -> default
+  (*) [ "$REVIEW_INTERVAL_QUIET" -ge 1 ] || REVIEW_INTERVAL_QUIET=15;;
 esac
 HB_GAP_MAX_S=$(( REVIEW_INTERVAL_QUIET * 90 ))      # 1.5x the quiet interval
 [ "$HB_GAP_MAX_S" -ge 3600 ] || HB_GAP_MAX_S=3600
@@ -842,13 +842,18 @@ hk_batch_since() { # <pending count>
 
 emit() { # reviews label_cleanups selfheals prunes artifacts nudges alerts mentions skills
   local nothing=true a resets="${STATUS_RESETS_DUE:-[]}" cifail="${CI_FAILURES_DUE:-[]}" merges="${MERGES_DUE:-[]}" fixes="${FIXES_DUE:-[]}"
-  local hk_only=false hk_n=0 hk_since hk_age=0
+  local hk_only=false hk_n=0 hk_since hk_age=0 art_rel
   # Tier 1 — a person is waiting for it, so it starts a session on its own.
   # A label cleanup answers a person who put a trigger on a reviewed SHA.
-  for a in "$1" "$2" "$5" "$6" "$7" "$8" "$cifail" "$merges" "$fixes"; do
+  for a in "$1" "$2" "$6" "$7" "$8" "$cifail" "$merges" "$fixes"; do
     [ "$(printf '%s' "$a" | jq length)" -gt 0 ] && nothing=false
   done
+  # an artifact `retry_release` only releases the trigger of a published
+  # artifact (docs/artifact.md): tier 2, unlike a `generate`
+  art_rel="$(printf '%s' "$5" | jq '[.[] | select(.action == "retry_release")] | length')"
+  [ "$(printf '%s' "$5" | jq length)" -gt "$art_rel" ] && nothing=false
   # Tier 2 — bookkeeping nobody waits on, deferrable (HOUSEKEEPING_DEFER_H).
+  hk_n="$art_rel"
   for a in "$3" "$4" "$resets"; do
     hk_n=$(( hk_n + $(printf '%s' "$a" | jq length) ))
   done
@@ -862,6 +867,11 @@ emit() { # reviews label_cleanups selfheals prunes artifacts nudges alerts menti
       log "housekeeping batch: $hk_n item(s) pending since $hk_since — a bookkeeping-only run"
     else
       log "housekeeping: $hk_n item(s) pending since $hk_since (${hk_age}h of ${HOUSEKEEPING_DEFER_H}h) — deferred to the next run with work"
+    fi
+    # a run takes the batch: an item still due after it (a release that failed
+    # again) waits a full period, not one tick
+    if [ "$nothing" = "false" ]; then
+      printf '%s\n' "$NOW_ISO" > "$HOUSEKEEPING_SINCE" 2>/dev/null || true
     fi
   fi
   printf '%s\n' "$NOW_ISO $MODE nothing_to_do=$nothing ${LOGS[*]:-}" >> "$WORK/HEARTBEAT.log" 2>/dev/null
