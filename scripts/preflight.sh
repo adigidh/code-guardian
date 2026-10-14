@@ -310,8 +310,9 @@ fi
 # API call: lib/holds.sh's live_holders over the events since the lock. When no
 # run logged a `locked` step on the PR since the lock — the step can predate log
 # retention after a crash — a recent event naming `PR #<n> ` counts as life
-# instead, from a run that has not ended the PR. Prints the live run id (8
-# chars) + minutes since its last event, or nothing.
+# instead, from a run that has not ended the PR. Prints the live run id (a
+# session UUID by 8 chars, as lib/common.sh → run_short) + minutes since its
+# last event, or nothing.
 # docs/review-mechanics.md → **Live holder**.
 holder_alive() { # <pr-number> <lock-ts> -> "<run> <how it is alive>", empty when not
   holder_cutoffs || return 1
@@ -327,7 +328,8 @@ holder_alive() { # <pr-number> <lock-ts> -> "<run> <how it is alive>", empty whe
       | select(. != null) as $l
       | ( ($l.msg // "") | test("fanned out") ) as $fan
       | ((($now - (($l | tkey) + "Z" | fromdateiso8601)) / 60) | floor) as $mins
-      | "\($l.run[0:8]) \(if $fan then "in the skill fan-out, last event" else "active" end) \($mins)m ago"' 2>/dev/null
+      | ($l.run | if test("^[0-9a-f]{8}-") then .[0:8] else . end) as $who
+      | "\($who) \(if $fan then "in the skill fan-out, last event" else "active" end) \($mins)m ago"' 2>/dev/null
 }
 
 # Drop the entries of every PR another live run holds (lib/holds.sh); the first
@@ -2551,7 +2553,9 @@ if [ "$MODE" = "audit" ]; then
   # Wasted-review accounting: a run that locked a PR and never reached a
   # terminal `review_step` threw its work away — the next heartbeat redoes the
   # review at full cost. Classified by cause, deterministically, from the log:
-  #   pod_restart  — a `pod_boot` warn falls inside the run's own event window
+  #   pod_restart  — a `pod_boot` warn falls inside the run's own event window;
+  #                  one its own gate pass logged before the session (the
+  #                  session took the gate's run id, CG_RUN_ID) does not count
   #   hard_kill    — no `tokens` event, i.e. the SessionEnd hook never ran
   #   terminated   — SessionEnd ran but the pipeline stopped mid-way (orderly
   #                  shutdown from outside; see docs/audit.md task 29)
@@ -2564,7 +2568,7 @@ if [ "$MODE" = "audit" ]; then
   STALL_CUTOFF="$(epoch2iso "$(( NOW_EPOCH - LOCK_TTL_MIN * 60 ))")"
   STALLS_WEEK="$(week_events | jq -rs --arg s "$SINCE_ISO" --arg cut "$STALL_CUTOFF" '
     [.[] | select(.ts >= $s)] as $w
-    | ($w | map(select(.event=="pod_boot") | .ts)) as $boots
+    | ($w | map(select(.event=="pod_boot"))) as $boots
     | [ $w | group_by(.run)[]
         | { run: .[0].run, day: (.[0].ts[0:10]), first: (.[0].ts), last: (.[-1].ts),
             steps: [.[] | select(.event=="review_step") | .msg
@@ -2574,12 +2578,12 @@ if [ "$MODE" = "audit" ]; then
                    | capture("output=(?<o>[0-9]+)") | .o | tonumber] | last // 0) }
         | select(.steps | any(test(" locked")))
         | select(.last <= $cut)
-        | .first as $first_ts | .last as $last_ts
+        | .first as $first_ts | .last as $last_ts | .run as $r
         | .prs = [ .steps[] | capture("^PR #(?<n>[0-9]+)") | .n ]
         | .terminal = (.steps | any(test("(^| )(done|aborted)") and (test("skill:") | not)))
         | .aborted  = (.steps | any(test("(^| )aborted")))
         | .cause = (if .terminal then "ok"
-                    elif ([$boots[] | select(. >= $first_ts and . <= $last_ts)] | length > 0)
+                    elif ([$boots[] | select(.run != $r and .ts >= $first_ts and .ts <= $last_ts)] | length > 0)
                       then "pod_restart"
                     elif (.tokens == 0) then "hard_kill"
                     else "terminated" end) ]
