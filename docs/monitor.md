@@ -20,7 +20,7 @@ delivery** below and the opt-in dashboard publish ([health.md](health.md) →
 | `github_recovered` | that pass came, and the outage's `github_unavailable` went out while it was still open | — (once per outage) |
 | `classifier_spike` | `classifier_alert_threshold` (missing = `20`; `0`/`off` disables both classifier alerts) `classifier_block` events in 24 h | — (once per UTC day) |
 | `review_post_blocked` | the classifier refused a `review-pr.sh post` in the last 24 h, and no later `posted` step of that PR exists | — (once per run and PR) |
-| `harness_drift` | `install.sh --check` names a part that is not current (`hooks`, `automode-rules`, `tool-deny`, `skill-agent`) | the check prints nothing |
+| `harness_drift` | an adapter's `install.sh --check` names a part that is not current (Claude Code: `hooks`, `automode-rules`, `tool-deny`, `skill-agent`; pi: `pi-extension`) | the checks print nothing |
 | `heartbeat_gap` | no review-gate `precheck` or `heartbeat` event for 1.5 × `review_interval_quiet` (at least 60 min) | the gate ticks again |
 | `backup_failing` | under a `work_repo`, a `work_backup` error no later push cleared for 6 h | the next push |
 | `dispatch_refused` | `dispatch_refused` events ([runbook.md](runbook.md) → **Review run** step 1) since the last accepted dispatch: the first 60 min old, the newest under 24 h old | the next accepted dispatch, or 24 h without a refusal |
@@ -32,8 +32,7 @@ delivery** below and the opt-in dashboard publish ([health.md](health.md) →
 The availability classes are every `api_failure` class except
 `invalid_request` and `max_output_tokens`, which an agent request causes. The
 events come from the harness hooks `StopFailure` (`api_failure`) and
-`PermissionDenied` (`classifier_block`) ([logging.md](logging.md) → **Harness
-adapters**). A GitHub failure's class comes from the error text: `auth`
+`PermissionDenied` (`classifier_block`) ([harness-claude-code.md](harness-claude-code.md) → **Adapter**). A GitHub failure's class comes from the error text: `auth`
 (HTTP 401), `rate_limit`, `access` (HTTP 403/404), `server_error` (HTTP 5xx),
 `network`, `unknown`. The weekly audit counts the week's refusals and model
 outages ([audit.md](audit.md) task 38).
@@ -64,14 +63,15 @@ their own detection-time claims (below), not the ledger.
      budget). Missed review work recovers on the next heartbeat by itself.
    - `classifier_spike` / `review_post_blocked` — the top patterns and the
      reasons; a documented step of the agent is an `autoMode.allow` rule
-     missing from the definition ([logging.md](logging.md) → **Harness
-     adapters**), anything else is a refusal that stands.
+     missing from the definition
+     ([harness-claude-code.md](harness-claude-code.md) → **Adapter**), anything else is a refusal that stands.
    - `github_unavailable` / `github_recovered` — first and last failed pass,
      the classes (`auth`, `access` → the token, operator-only; `rate_limit` →
      quota; `server_error`, `network` → GitHub or the network). Missed review
      work recovers on the next heartbeat by itself.
    - `harness_drift` — `bash "$HOME/scripts/harness/claude-code/install.sh"`
-     is the fix; it takes effect from the next session.
+     (`pi-extension`: `scripts/harness/pi/install.sh`) is the fix; it takes
+     effect from the next session.
    - `heartbeat_gap` — the review schedule is disabled, deleted or its gate
      cannot start (`list_schedules`; [worklist.md](worklist.md) → **The
      schedule gate**).
@@ -147,7 +147,7 @@ as an operational lesson ([preferences.md](preferences.md)).
 The harness adapter logs one `review_cost` event per finished review: the API
 usage between its `locked` and `done` steps, subagents included, and the shape
 of that window — `peak_ctx`, `repeats`, `max_out`, `failures`
-([logging.md](logging.md) → **Harness adapters**). The monitor judges every
+([harness-claude-code.md](harness-claude-code.md) → **Adapter**). The monitor judges every
 event of the last 24 h newer than `work/.review-anomaly-seen` once, under a
 `mkdir` claim. Each rule's limit is **max(floor, factor × median)**. A review
 at or over any limit is an entry:

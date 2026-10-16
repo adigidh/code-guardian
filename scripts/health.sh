@@ -40,6 +40,7 @@ LOG_JOB=monitor
 if ! . "$SCRIPT_DIR/log.sh" >/dev/null 2>&1; then logev() { :; }; fi
 LOG_DIR="${LOG_DIR:-$WORK/logs}"
 . "$SCRIPT_DIR/lib/common.sh"
+. "$SCRIPT_DIR/lib/harness.sh"
 BOT_NAME="$(cfg bot_display_name)"; BOT_NAME="${BOT_NAME:-Code Guardian}"
 
 # scratch of this process, removed on any exit (a gate that stops the pass)
@@ -64,7 +65,8 @@ ROW_JQ='
   group_by(.ts[0:13]) | map({h: .[0].ts[0:13],
     gate: (map(select(.event == "precheck")) | group_by(.job) | map({key: .[0].job, value: length}) | from_entries),
     gate_err: n(.event == "precheck" and .level == "error"),
-    sessions: n(.event == "tokens"),
+    # a session that ends twice (a pi session reloaded and closed again) counts once
+    sessions: (map(select(.event == "tokens") | .run) | unique | length),
     reviews: n(.event == "review_step" and (.msg | test("^PR #[0-9]+:? +([0-9a-f]{7,40} +)?done$"))),
     model_fail: n(.event == "api_failure" and ((.msg | capture("^(?<c>[a-z_]+):") | .c) // "unknown" | IN("invalid_request", "max_output_tokens") | not)),
     gh_fail: n(.event == "preflight" and .level == "error" and (.msg | startswith("could not list open PRs"))),
@@ -145,11 +147,14 @@ incidents_merge() { # <keep>
 
 # true when a harness adapter writes the per-run `tokens` event
 # (docs/logging.md → Harness adapters): this process runs in a Claude Code
-# session, or the Claude Code adapter's SessionEnd hook is installed — the
-# monitor's gate runs outside the session
+# session, the Claude Code adapter's SessionEnd hook is installed, or the pi
+# extension is linked on an agent that runs on pi — the monitor's gate runs
+# outside the session, and every DAM pod carries pi, so the link alone says
+# nothing about a Bob agent's sessions
 tokens_adapter() {
   if [ "${CLAUDECODE:-}" = "1" ] || jq -e '[.hooks.SessionEnd[]?.hooks[]?.command | strings
-        | select(endswith("/log-session-tokens.sh"))] | length > 0' "$HOME_DIR/.claude/settings.json" >/dev/null 2>&1
+        | select(endswith("/log-session-tokens.sh"))] | length > 0' "$HOME_DIR/.claude/settings.json" >/dev/null 2>&1 \
+     || { [ "$(cg_harness)" = pi ] && [ -L "$HOME_DIR/.pi/agent/extensions/code-guardian.ts" ]; }
   then echo true; else echo false; fi
 }
 

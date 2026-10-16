@@ -214,8 +214,10 @@ counts. It never loads fixture sources, diffs, skill outputs or review bodies.
 **Every subagent prompt inside a phase bracket — skill fan-out and reviewer
 alike — carries the usage nonce and the instruction to print
 `usage-nonce:<NONCE>` as its first output line.** The snapshot sums only the
-transcripts holding the nonce. On a harness without subagents, review inline and
-fall back to **Segmented run** when depth would degrade.
+transcripts holding the nonce. The subagent mechanism is the harness's
+([logging.md](logging.md) → **Harness adapters** names its file). On a harness
+with none, review inline and fall back to **Segmented run** when depth would
+degrade.
 
 Loop over the slugs sequentially — fixtures and phases never run concurrently
 (`benchmark-phase.sh` refuses an overlapping `begin`). Per fixture:
@@ -228,7 +230,7 @@ Loop over the slugs sequentially — fixtures and phases never run concurrently
 
    ```bash
    B="<fixture_root>/<slug>"; PR_DIR="/tmp/benchmark-pr-<slug>"
-   rm -rf "$PR_DIR" "$PR_DIR".out "$PR_DIR".s-*
+   rm -rf "$PR_DIR" "$PR_DIR".out "$PR_DIR".s-* "$PR_DIR".prompts-* "$PR_DIR".reviewer-*
    git init -q "$PR_DIR" && cp -a "$B/base/." "$PR_DIR/"
    git -C "$PR_DIR" -c user.email=bench@local -c user.name=bench add -A
    git -C "$PR_DIR" -c user.email=bench@local -c user.name=bench commit -qm base
@@ -268,8 +270,9 @@ Loop over the slugs sequentially — fixtures and phases never run concurrently
    Archive the skill outputs beside it:
    `cp -a "$PR_DIR.out" "$HOME/work/benchmark/results/raw/<ts>-<slug>-first-skills"`.
 3. **Re-review** — bracket it `"<slug>-rereview"`. Clear the first review's
-   skill state (`rm -rf "$PR_DIR".out "$PR_DIR".s-*`, then
-   `git -C "$PR_DIR" worktree prune`), advance the tree to v2 (repeat the
+   skill state
+   (`rm -rf "$PR_DIR".out "$PR_DIR".s-* "$PR_DIR".prompts-* "$PR_DIR".reviewer-*`,
+   then `git -C "$PR_DIR" worktree prune`), advance the tree to v2 (repeat the
    swap-and-commit on `pr` with `head-v2/`), re-run the fan-out per
    docs/review-rereview.md → **Re-review output** (routing from
    `git -C "$PR_DIR" diff --name-only pr~1..pr`), then spawn a **separate**
@@ -403,10 +406,11 @@ whose `judge_model_used` the pinned `judge` matches.
 
 `model` is the **exact model id** of the session as the harness names it; when
 unavailable, write `unknown` and log it. `effort` is the reasoning effort the
-session ran at, read from the harness (`CLAUDE_EFFORT` on Claude Code), else
-`unknown`; reviewer and skill subagents run without an effort override.
-Deltas compare runs of the same model **and** effort; a run without `effort`
-matches only another run without it, and a run at effort `unknown` gets no
+session ran at, read from the harness (`scripts/lib/harness.sh`: `CLAUDE_EFFORT`
+on Claude Code, `PI_REASONING_LEVEL` on pi), else `unknown`; reviewer and
+skill subagents run without an effort override. Deltas compare runs of the
+same harness, model **and** effort; a run without `effort` matches only
+another run without it, and a run at effort `unknown` gets no
 delta — report it as `effort unknown`.
 
 ### `RESULTS.md`

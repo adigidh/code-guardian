@@ -198,6 +198,11 @@ ev 600 session info tokens "in=1 out=2"
 CLAUDECODE="" record
 status
 assert_jq '.services[] | select(.key == "harness") | .note | startswith("Sessions 24 h: 1.")' 'a session that wrote the event counts'
+# a pi session reloaded and closed again writes a second tokens event: one session
+ev 600 session info tokens "in=1 out=3"
+CLAUDECODE="" record
+status
+assert_jq '.services[] | select(.key == "harness") | .note | startswith("Sessions 24 h: 1.")' 'two tokens events of one run count one session'
 # the adapter's SessionEnd hook, read from the gate outside a session: a measured zero
 h_case h_sessions_measured_zero
 mkdir -p "$FAKE_HOME/.claude"
@@ -209,6 +214,15 @@ assert_jq '.tokens_adapter == true and (.services[] | select(.key == "harness") 
   'with the adapter hook installed, 24 h without a tokens event count zero'
 CLAUDECODE="" henv bash "$HEALTH" report > "$SANDBOX/page.html" 2>>"$STDERR_LOG"
 has "$SANDBOX/page.html" 'Sessions and reviews per hour' 'the chart keeps the sessions'
+mkdir -p "$FAKE_HOME/.pi/agent/extensions"; rm -f "$FAKE_HOME/.claude/settings.json"
+ln -s "$REPO_ROOT/scripts/harness/pi/extension.ts" "$FAKE_HOME/.pi/agent/extensions/code-guardian.ts"
+CLAUDECODE="" PLATFORM_HARNESS=pi record
+status
+assert_jq '.tokens_adapter == true' 'on a pi agent the linked extension is a tokens adapter'
+CLAUDECODE="" PLATFORM_HARNESS=bob record
+status
+assert_jq '.tokens_adapter == false' 'on a Bob agent the link alone is no tokens adapter'
+rm -f "$FAKE_HOME/.pi/agent/extensions/code-guardian.ts"
 rm -f "$FAKE_HOME/.claude/settings.json"
 CLAUDECODE=1 record
 status

@@ -28,7 +28,7 @@ dashboard.html    # the last published page
   | --- | --- |
   | `gate` | `precheck` events per job — the schedule fires that reached their gate |
   | `gate_err` | `precheck` errors — a gate that broke |
-  | `sessions` / `reviews` | `tokens` events / `review_step … done` |
+  | `sessions` / `reviews` | distinct runs with a `tokens` event (a session that ends twice in one hour counts once) / `review_step … done` |
   | `model_fail` | `api_failure` of the availability classes ([monitor.md](monitor.md) → **The alerts**) |
   | `gh_fail` / `gh_warn` | gate passes that could not list the open PRs / `gh_api` and preflight API-error warnings |
   | `classifier` / `tool_fail` | `classifier_block` / `tool_failure` |
@@ -62,11 +62,13 @@ state.
 
 **Sessions** — `status.json` → `tokens_adapter` is `true` when a harness
 adapter writes the `tokens` event ([logging.md](logging.md) → **Harness
-adapters**): `CLAUDECODE=1`, or the Claude Code adapter's `SessionEnd` hook in
-`~/.claude/settings.json`, which the monitor's gate reads from outside the
-session. With `false` and no `tokens` event in 24 h, the Harness note says
-`Sessions 24 h: not measured`, and a chart window with no session shows the
-reviews alone. A `tokens` event counts on any harness.
+adapters**): `CLAUDECODE=1`, the Claude Code adapter's `SessionEnd` hook in
+`~/.claude/settings.json`, or the pi extension's link in
+`~/.pi/agent/extensions/` on an agent whose harness is pi, which the
+monitor's gate reads from outside the session. With `false` and no `tokens`
+event in 24 h, the Harness note says `Sessions 24 h: not measured`, and a
+chart window with no session shows the reviews alone. A `tokens` event counts
+on any harness, once per run and hour: a session that ends twice counts once.
 
 ## The dashboard
 
