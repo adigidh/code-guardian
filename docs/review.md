@@ -213,7 +213,8 @@ finding; the audit counts it ([audit.md](audit.md) task 31).
 
 Unless preferences say otherwise: **Correctness** (logic, off-by-one, null
 risks, races) · **Security** · **Reliability** · **Performance** ·
-**Architecture** (coupling, layer boundaries, broken contracts) · **Tests**
+**Accessibility** (rendered UI only) · **Architecture** (coupling, layer
+boundaries, broken contracts) · **Tests**
 (missing coverage, flaky patterns) · **Maintainability** (dead code, error
 handling) · **Delivery** (a breaking change in an env var, a CLI flag, a config
 key or a migration; a CI step that does not run what the change needs; a
@@ -266,6 +267,14 @@ names the input or state that triggers the defect and its consequence.
   a request handler; a large result read or returned with no pagination or
   streaming; repeated expensive work in a loop that can move outside it;
   allocations; missing indexes.
+- **Accessibility (WCAG 2.1 AA)** — only when the diff touches HTML, JSX/TSX,
+  CSS or other rendered UI markup; otherwise skip it with no output. An image
+  or icon with no alt text, or an empty alt on a meaningful image; a button,
+  link or widget built from a non-semantic element (a clickable `div`) with no
+  role and no keyboard handling; a form input with no label or `aria-label`;
+  status shown by color alone, with no text or icon; a removed or weakened
+  focus indicator, or a control a keyboard cannot reach or operate. A 🟡 names
+  the control and what a keyboard or screen-reader user can no longer do.
 
 **Audience** — the `Audience:` line of `work/MEMORY.md` → `## Review Style`;
 no line = `agent-written, agent-read code`. For agent-read code, human
