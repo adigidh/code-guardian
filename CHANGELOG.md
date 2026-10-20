@@ -11,6 +11,15 @@ Consumed by the version check ([docs/persistence.md](docs/persistence.md) →
 Entries below 2.4.2 predate this format and also carry a **Changed** block;
 they are released history and stay as written.
 
+## 9.11.0 — 2026-10-20
+
+**Upgrade:** With `benchmark: enabled` and `benchmark_judge` set to a model
+id, run `bash "$HOME/scripts/benchmark-judge.sh" check "<benchmark_judge>"`
+once (no model call). When it prints a reason, tell the operator in one line
+that the judge needs a signed-in `claude` CLI (`claude auth login` once, or
+`ANTHROPIC_API_KEY`) or a `pi` CLI on the host — **operator-only**
+([docs/monitor.md](docs/monitor.md) → `judge_unavailable`).
+
 ## 9.10.1 — 2026-10-20
 
 **Upgrade:** Nothing — docs are re-read per run, and pi loads the linked
