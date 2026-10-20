@@ -11,6 +11,18 @@ Consumed by the version check ([docs/persistence.md](docs/persistence.md) →
 Entries below 2.4.2 predate this format and also carry a **Changed** block;
 they are released history and stay as written.
 
+## 10.0.0 — 2026-10-20
+
+**Upgrade:**
+1. Offer `monitor_owner` ([docs/config.md](docs/config.md) → **Monitor**): the
+   roster login the monitor's alert DMs go to when it is not the
+   `escalation_owner`. Unset keeps `escalation_owner`.
+2. Re-register `code-guardian-monitor-15m` when its task text still says "the
+   escalation DM", per ONBOARDING Step 6f: create the corrected schedule, then
+   `delete_schedule` the old id; keep its name, cron, `precheck` and
+   `sessionTitle`. Idempotent — skip a schedule that already says "the
+   monitor-owner DM".
+
 ## 9.11.0 — 2026-10-20
 
 **Upgrade:** With `benchmark: enabled` and `benchmark_judge` set to a model
