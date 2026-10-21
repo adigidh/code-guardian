@@ -396,6 +396,11 @@ only via this backup or the configured output surfaces (`docs/runbook.md` →
   every blocking finding at every location and run the checks the review
   carries. It tells reviewers apart by login and review marker, so a GitHub
   App login that posts for several agents works too.
+  [`security-a11y`](.agents/skills/security-a11y/SKILL.md), a review skill
+  for web services and front ends: the OWASP Top 10 checklist, and WCAG 2.1 AA
+  (`references/accessibility.md`) only when a changed file is rendered UI. It
+  runs only where a `## Review skills` row enables it, in its own subagent and
+  section, and cites an A06 advisory only after an OSV lookup.
   [`pr-open`](.agents/skills/pr-open/SKILL.md) is its first-push
   counterpart: it self-reviews the branch and writes a PR body with the
   scope, a guide for a human reviewer and the person's decisions in a hidden

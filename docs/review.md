@@ -98,7 +98,8 @@ e. **Compose** — `review-pr.sh compose-brief <n>` prints this PR's contract: t
    review to the chat UI.
 f. **Post** — `review-pr.sh post <n> --verdict <VERDICT> --body <ctx>/body.md
    --findings <ctx>/findings.json [--comments <ctx>/comments.json] [--meta
-   <ctx>/meta.json]`, as `compose-brief` prints it; a re-review passes
+   <ctx>/meta.json] --model <id>`, as `compose-brief` prints it — `<id>` is
+   the exact model id of this session, for the footer; a re-review passes
    `--findings <ctx>/findings.annotated.json`. It runs Check 2 and the dedup
    re-check, maps the inline comments
    ([review-mechanics.md](review-mechanics.md) → **Mapping findings to inline
@@ -212,69 +213,19 @@ finding; the audit counts it ([audit.md](audit.md) task 31).
 ## Criteria & review style
 
 Unless preferences say otherwise: **Correctness** (logic, off-by-one, null
-risks, races) · **Security** · **Reliability** · **Performance** ·
-**Accessibility** (rendered UI only) · **Architecture** (coupling, layer
-boundaries, broken contracts) · **Tests**
-(missing coverage, flaky patterns) · **Maintainability** (dead code, error
-handling) · **Delivery** (a breaking change in an env var, a CLI flag, a config
-key or a migration; a CI step that does not run what the change needs; a
-runtime assumption about paths, permissions, time zone or the concurrency
-model). The profile's `## Checks` rows say what CI runs, as orientation only
+risks, races) · **Security** (injection, credential leaks, OWASP top 10) ·
+**Reliability** (an external call with no timeout or error handling, a retry
+that is not idempotent, a swallowed error, a multi-step operation that a
+failure leaves half-applied) · **Performance** (allocations, N+1, missing
+indexes, an unbounded loop over input, blocking I/O on a hot path, no
+pagination) · **Architecture** (coupling, layer boundaries, broken
+contracts) · **Tests** (missing coverage, flaky patterns) · **Maintainability** (dead code, error handling) ·
+**Delivery** (a breaking change in an env var, a CLI flag, a config key or a
+migration; a CI step that does not run what the change needs; a runtime
+assumption about paths, permissions, time zone or the concurrency model). The
+profile's `## Checks` rows say what CI runs, as orientation only
 ([profile.md](profile.md) → **What it is, and is not**). Past 2000 diff lines:
 focus on the most critical files, still post a full review.
-
-**Dimension checks** — each pattern below nominates a finding; a pattern alone
-is not one. Severity follows [finding-form.md](finding-form.md): a 🔴 or 🟡
-names the input or state that triggers the defect and its consequence.
-
-- **Security (OWASP Top 10)**
-  - A01 access control: a read or change of data with no caller authorization
-    check; an object reference from user input with no ownership check; a path
-    to higher privilege.
-  - A02 cryptography: a plaintext password; a hardcoded secret or token; HTTP
-    where HTTPS is needed; custom or weak crypto; a secret in a log line or
-    response.
-  - A03 injection: user input joined into a shell command, SQL, LDAP, XML or
-    template; a query built around its parameters; untrusted input passed to
-    `eval` or `exec`.
-  - A04 insecure design: validation on the client only; a later step of a
-    multi-step flow that trusts an earlier step; a sensitive operation with no
-    rate limit.
-  - A05 misconfiguration: `Access-Control-Allow-Origin: *` on a credentialed
-    endpoint; a stack trace in a response; disabled TLS verification; an
-    exposed debug endpoint.
-  - A06 components: a new direct dependency with a published CVE at its pinned
-    version.
-  - A07 authentication: a token with no expiry; a credential in a URL query; an
-    authentication bypass through a parameter.
-  - A08 integrity: untrusted data deserialized with a format that runs code; a
-    dynamic `require` or `import` of an external path; a download with no
-    signature or checksum check.
-  - A09 logging: a catch block that hides a security exception; a failed
-    authentication that is not logged.
-  - A10 SSRF: an outbound request to a URL from user input with no host
-    allowlist; a redirect that can reach an internal host; a non-HTTP(S)
-    scheme.
-- **Reliability** — an external call (HTTP, database, subprocess) with no
-  timeout or error handling, where a failure hangs or crashes the process; a
-  retried operation that is not idempotent and corrupts state or repeats work;
-  a swallowed error (an empty catch, or a log-only catch where the failure must
-  propagate); a multi-step operation that a later failing step leaves
-  half-applied.
-- **Performance** — N+1: a loop with one query or call per item where one
-  batched call works; an unbounded loop or recursion over external input, or
-  new O(n²) work over a collection that grows; blocking I/O on a hot path or in
-  a request handler; a large result read or returned with no pagination or
-  streaming; repeated expensive work in a loop that can move outside it;
-  allocations; missing indexes.
-- **Accessibility (WCAG 2.1 AA)** — only when the diff touches HTML, JSX/TSX,
-  CSS or other rendered UI markup; otherwise skip it with no output. An image
-  or icon with no alt text, or an empty alt on a meaningful image; a button,
-  link or widget built from a non-semantic element (a clickable `div`) with no
-  role and no keyboard handling; a form input with no label or `aria-label`;
-  status shown by color alone, with no text or icon; a removed or weakened
-  focus indicator, or a control a keyboard cannot reach or operate. A 🟡 names
-  the control and what a keyboard or screen-reader user can no longer do.
 
 **Audience** — the `Audience:` line of `work/MEMORY.md` → `## Review Style`;
 no line = `agent-written, agent-read code`. For agent-read code, human

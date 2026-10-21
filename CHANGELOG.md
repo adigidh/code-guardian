@@ -11,7 +11,18 @@ Consumed by the version check ([docs/persistence.md](docs/persistence.md) →
 Entries below 2.4.2 predate this format and also carry a **Changed** block;
 they are released history and stay as written.
 
-## 10.2.0 — 2026-10-20
+## 10.3.0 — 2026-10-21
+
+**Upgrade:** Nothing is required. To run the OWASP and WCAG checks, add the
+row `| security-a11y | <definition_repo> | always | Security & Accessibility |`
+to `work/CONFIG.md` → `## Review skills` (**operator-only**; skip if the row
+exists). The instance's core review keeps its Security criterion as before.
+
+## 10.2.1 — 2026-10-21
+
+**Upgrade:** Nothing — docs are re-read per run.
+
+## 10.2.0 — 2026-10-21
 
 **Upgrade:** Nothing — docs are re-read per run.
 

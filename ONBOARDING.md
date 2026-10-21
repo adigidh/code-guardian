@@ -633,6 +633,8 @@ Final shape:
 | react-ui-engineering | dam-agents/dam | .tsx,.jsx | React UI Engineering Review |
 ```
 
+Optional, for web services and front ends: add `| security-a11y | <definition_repo> | always | Security & Accessibility |` — OWASP Top 10, plus WCAG 2.1 AA when a changed file is rendered UI. Offer it; do not add it unasked.
+
 ### Build the developer roster (`work/DEVELOPERS.md`) — only when Slack is enabled
 
 The roster is the **only** set of people the agent may ever @-mention
